@@ -1,0 +1,24 @@
+{
+  "name": "crypto-tight-range-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "node --experimental-strip-types tests/range.test.ts && node --experimental-strip-types tests/paper.test.ts && node --experimental-strip-types tests/config.test.ts && node --experimental-strip-types tests/backup.test.ts && node --experimental-strip-types tests/swing.test.ts"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^0.10.4",
+    "next": "14.2.15",
+    "postgres": "^3.4.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "typescript": "^5.5.4"
+  }
+}
