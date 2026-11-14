@@ -11,7 +11,7 @@ import { slipPrice, levels, sizePosition, replayCandles, closeMath } from "./pap
 import { loadAccount, markOpen } from "./account";
 import { sendTelegram } from "./telegram";
 import { fmtPrice, fmtUsd } from "./format";
-import { checkCandles } from "./dataquality";
+import { checkCandles, nextHealthState } from "./dataquality";
 import { buildForecast, logForecast, loadDueForecasts, saveOutcome, type Direction4 } from "./forecast";
 import { resolveForecast } from "./outcome";
 
@@ -120,7 +120,7 @@ async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], 
   const tfMs = s.timeframeMin * MIN;
   const swing = s.detectionMode === "swing_pattern";
   // Data-quality gate: stale, gapped or inconsistent candles never reach detection, breakout scans or forecasts.
-  const q = checkCandles(all, { tfMs, now, window: swing ? Math.min(s.swingMaxCandles, 60) : s.rangeLookback, maxLagMs: 2 * tfMs + MIN, maxJumpPct: 20 });
+  const q = checkCandles(all, { tfMs, now, window: swing ? Math.min(s.swingMaxCandles, 60) : s.rangeLookback, maxLagMs: Math.max(2 * tfMs + MIN, 6 * MIN), maxJumpPct: 20 });
   await recordHealth(db, s, sym, q.ok ? [] : q.reasons, msgs);
   if (!q.ok) return;
   const closed = q.closed;
@@ -332,13 +332,15 @@ async function resolveDue(db: Db, s: Settings, sym: string, latest: Candle[], no
   }
 }
 
-// Health is stored per symbol; a message is sent only when it changes (problem appears, changes, or clears).
+// Health is stored per symbol. A problem is announced only after DATA_ALERT_AFTER consecutive bad ticks, and
+// recovery only if a problem was announced, so a single slow poll never messages you.
+const DATA_ALERT_AFTER = 3;
 async function recordHealth(db: Db, s: Settings, sym: string, reasons: string[], msgs: string[]) {
   const text = reasons.join("; ").slice(0, 400);
-  const ok = reasons.length === 0;
-  const prev = (await db`select ok, reasons from data_health where symbol = ${sym} and timeframe_min = ${s.timeframeMin}`)[0];
-  await db`insert into data_health (symbol, timeframe_min, ok, reasons) values (${sym}, ${s.timeframeMin}, ${ok}, ${text})
-    on conflict (symbol, timeframe_min) do update set ok = excluded.ok, reasons = excluded.reasons, updated_at = now()`;
-  if (ok && prev && !prev.ok) msgs.push(`✅ DATA OK AGAIN: ${sym} ${s.timeframeMin}m. Signals and forecasts have resumed.`);
-  else if (!ok && (!prev || prev.ok || prev.reasons !== text)) msgs.push(`⚠️ DATA PROBLEM: ${sym} ${s.timeframeMin}m\n${text}\nNo signals or forecasts for this symbol until the data is healthy.`);
+  const row = (await db`select bad_streak, alerted from data_health where symbol = ${sym} and timeframe_min = ${s.timeframeMin}`)[0];
+  const { state, send } = nextHealthState(row ? { badStreak: Number(row.bad_streak), alerted: !!row.alerted } : null, reasons.length > 0, DATA_ALERT_AFTER);
+  await db`insert into data_health (symbol, timeframe_min, ok, reasons, bad_streak, alerted) values (${sym}, ${s.timeframeMin}, ${reasons.length === 0}, ${text}, ${state.badStreak}, ${state.alerted})
+    on conflict (symbol, timeframe_min) do update set ok = excluded.ok, reasons = excluded.reasons, bad_streak = excluded.bad_streak, alerted = excluded.alerted, updated_at = now()`;
+  if (send === "recovered") msgs.push(`✅ DATA OK AGAIN: ${sym} ${s.timeframeMin}m. Signals and forecasts have resumed.`);
+  else if (send === "problem") msgs.push(`⚠️ DATA PROBLEM: ${sym} ${s.timeframeMin}m (bad for ${DATA_ALERT_AFTER} checks in a row)\n${text}\nNo signals or forecasts for this symbol until the data is healthy.`);
 }

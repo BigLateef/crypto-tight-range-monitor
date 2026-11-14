@@ -54,4 +54,15 @@ assert.equal(resolveForecast(F, [candle(endOpen, 120)], issuedT + 30 * 60000, P)
 // horizon that is not a multiple of the candle length, and a bad reference price
 assert.equal(resolveForecast({ ...F, horizonMin: 7 }, [], NOW, P).status, "unresolvable");
 assert.equal(resolveForecast({ ...F, refPrice: 0 }, [candle(endOpen, 1)], NOW, P).status, "unresolvable");
+// no-trade hole at the horizon end: carry the last close forward, but only once a LATER candle proves the spell ended
+{
+  const before = candle(endOpen - TF, 101);
+  const after = candle(endOpen + TF, 130); // far away from 101; must never be used
+  const r = resolveForecast(F, [before, after], NOW, P);
+  assert.ok(r.status === "resolved" && r.endPrice === 101 && r.actual === "UP");
+  // no later candle yet: still pending (the end candle may simply not have arrived)
+  assert.equal(resolveForecast(F, [before], NOW, P).status, "pending");
+  // the previous candle is too old to carry across: stays pending, not a guess
+  assert.equal(resolveForecast(F, [candle(endOpen - 6 * TF, 101), after], NOW, P).status, "pending");
+}
 console.log("outcome tests passed");

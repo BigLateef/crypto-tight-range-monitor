@@ -38,13 +38,21 @@ export type Resolution =
 // issuedT + horizon, i.e. whose open time is issuedT + horizon - tf.
 // Forecasts whose end candle is still missing long after the horizon (graceVs) become unresolvable instead of
 // silently waiting forever or being filled with a guess.
-export function resolveForecast(f: DueForecast, candles: Candle[], now: number, p: OutcomeParams, graceMs = 6 * 3600000): Resolution {
+export function resolveForecast(f: DueForecast, candles: Candle[], now: number, p: OutcomeParams, graceMs = 6 * 3600000, maxCarry = 3): Resolution {
   const endClose = f.issuedT + f.horizonMin * 60000;
   if (f.horizonMin * 60000 % p.tfMs !== 0) return { status: "unresolvable", why: "horizon is not a multiple of the candle length" };
   if (!(f.refPrice > 0)) return { status: "unresolvable", why: "bad reference price" };
   if (now < endClose) return { status: "pending" };
   const openT = endClose - p.tfMs;
-  const c = candles.find((x) => x.t === openT);
+  let c = candles.find((x) => x.t === openT);
+  if (!c) {
+    // No candle for that period: exchanges omit candles when nothing traded. If a LATER candle exists (so the quiet
+    // spell is over and nothing was skipped by a poll failure) and an earlier one is at most `maxCarry` candles
+    // back, the price at the horizon end was the last close before it. Never uses a close after the horizon end.
+    const later = candles.some((x) => x.t >= endClose);
+    const before = [...candles].reverse().find((x) => x.t < openT);
+    if (later && before && openT - before.t <= maxCarry * p.tfMs) c = before;
+  }
   if (!c || !(c.c > 0)) {
     return now - endClose > graceMs ? { status: "unresolvable", why: "horizon-end candle never became available" } : { status: "pending" };
   }
