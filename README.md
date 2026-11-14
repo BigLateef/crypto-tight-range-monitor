@@ -40,6 +40,21 @@ Next.js 14 + TypeScript + Neon Postgres. Watches public candle data for tight ra
 - Data gate: stale, gapped, duplicated, malformed or jumpy candles block detection, breakout scans and forecasts for that symbol. A Telegram message is sent only when a symbol's data health changes (problem, changed problem, recovery).
 - Not yet done: backtest/eval command, probability model, alert outbox with retries and cooldown, a Settings-page field for horizons.
 
+## Evaluation: does the rule have an edge? (`npm run eval`)
+```
+npm run eval -- --symbols BTC-USD,ETH-USD,SOL-USD --days 60          # development walk-forward (holdout untouched)
+npm run eval -- --csv-dir ./my-candles --symbols BTC-USD              # CSV files named SYMBOL.csv, columns t,o,h,l,c,v
+npm run eval -- --final                                               # score the locked holdout (once)
+```
+Options: `--tf 5 --horizons 60,240 --fee 0.1 --slip 0.05 --delay 1 --min-trades 100 --folds 4 --holdout 0.2 --alpha 0.05`. Public candles are cached in `eval/cache`; reports go to `eval/out/latest.json`.
+- **Signals** are generated causally with the same range/breakout code as the live engine, with fixed parameters (nothing is tuned on the data).
+- **Target** is the live one: cost-aware UP / DOWN / SIDEWAYS at the horizon (threshold = max(round-trip cost, `--min-move`)).
+- **Walk-forward**: expanding training blocks, chronological test blocks, training labels purged so none overlap a test block. Samples spanning a data gap are dropped.
+- **Holdout lock**: the first run writes `eval/holdout.lock.json` (latest 20% of history, fixed from then on; commit it). Development numbers never use it. `--final` scores it once; a second scoring needs `--accept-reuse` and is logged.
+- **Trades** pay fee + slippage on both sides, enter after `--delay` candles, never overlap. Baselines: momentum, always-long at the rule's timing, buy-and-hold, majority class, and train-frequency/uniform probabilities (Brier, log loss).
+- **Verdict**: needs `--min-trades` pooled trades, a day-clustered bootstrap lower bound above 0 (Bonferroni across horizons), and a better mean than the momentum and same-timing baselines. Otherwise it prints NO EDGE DEMONSTRATED or INSUFFICIENT DATA.
+- **Limitations**: the rule outputs no probabilities yet, so calibration is not reported for it; spot candles only (no spread data, no funding, no order-book depth); fixed slippage and fee; one provider; 60 days is a short window and regimes change; the rule tested is the tight-range mode (swing mode is not simulated); passing is evidence, not a guarantee. The unit tests use synthetic series only, so they prove the harness works, not that any market is beatable.
+
 ## Files
 - `lib/range.ts`, `lib/paper.ts`, `lib/config.ts`: pure logic, tested with `npm test` (`node --experimental-strip-types`).
 - `lib/engine.ts`: one tick (detect, confirm, exits, entries, snapshot). `app/api/tick` is the cron target.
