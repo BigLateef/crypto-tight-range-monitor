@@ -43,6 +43,8 @@ export interface Settings {
   lockEnabled: boolean;
   lockTriggerPct: number;
   lockProfitPct: number;
+  forecastHorizonsMin: number[];
+  minMovePct: number;
 }
 
 export const DEFAULTS: Settings = {
@@ -82,6 +84,8 @@ export const DEFAULTS: Settings = {
   lockEnabled: false,
   lockTriggerPct: 1.5,
   lockProfitPct: 0.5,
+  forecastHorizonsMin: [60, 240],
+  minMovePct: 0,
 };
 
 // [min, max, integer?]
@@ -111,6 +115,7 @@ const NUM: Record<string, [number, number, boolean]> = {
   maxHoldMinutes: [0, 1440, true],
   lockTriggerPct: [0.1, 100, false],
   lockProfitPct: [0, 50, false],
+  minMovePct: [0, 20, false],
 };
 const BOOL = ["paperEnabled", "allowLong", "allowShort", "lockEnabled"];
 const ENUM: Record<string, string[]> = {
@@ -122,6 +127,20 @@ const ENUM: Record<string, string[]> = {
 };
 const TIMEFRAMES = [1, 5, 15, 60];
 const SYMBOL_RE = /^[A-Z0-9]{2,10}-[A-Z]{3,5}$/;
+
+// Horizons are configured in minutes and must be whole multiples of the candle length.
+export function parseHorizons(v: unknown, timeframeMin: number): number[] | null {
+  const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[\s,]+/) : null;
+  if (!raw) return null;
+  const out: number[] = [];
+  for (const x of raw) {
+    if (x === "" || x === null) continue;
+    const n = Number(x);
+    if (!Number.isInteger(n) || n < timeframeMin || n > 10080 || n % timeframeMin !== 0) return null;
+    if (!out.includes(n)) out.push(n);
+  }
+  return out.length >= 1 && out.length <= 5 ? out.sort((a, b) => a - b) : null;
+}
 
 export function parseSymbols(v: unknown): string[] | null {
   const raw = Array.isArray(v) ? v : typeof v === "string" ? v.split(/[\s,]+/) : null;
@@ -163,6 +182,13 @@ export function validateSettings(input: Record<string, unknown>, base: Settings 
       else errors.push("symbols must be 1-10 pairs like BTC-USD (BTC-USDT on binance)");
     }
     // unknown keys are ignored
+  }
+  if ("forecastHorizonsMin" in (input || {})) {
+    const p = parseHorizons((input as any).forecastHorizonsMin, s.timeframeMin);
+    if (p) s.forecastHorizonsMin = p;
+    else errors.push(`forecastHorizonsMin must be 1-5 whole-minute horizons that are multiples of the ${s.timeframeMin}m candle (max 10080)`);
+  } else if (parseHorizons(s.forecastHorizonsMin, s.timeframeMin) === null) {
+    errors.push(`forecast horizons ${s.forecastHorizonsMin.join(",")} are not multiples of the ${s.timeframeMin}m candle`);
   }
   if (!s.allowLong && !s.allowShort) errors.push("allow at least one of long / short");
   if (s.sizingMode === "risk_pct" && s.stopMode === "off") errors.push("risk-based sizing needs a stop (stop is off)");

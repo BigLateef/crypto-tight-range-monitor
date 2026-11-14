@@ -11,6 +11,9 @@ import { slipPrice, levels, sizePosition, replayCandles, closeMath } from "./pap
 import { loadAccount, markOpen } from "./account";
 import { sendTelegram } from "./telegram";
 import { fmtPrice, fmtUsd } from "./format";
+import { checkCandles } from "./dataquality";
+import { buildForecast, logForecast, loadDueForecasts, saveOutcome, type Direction4 } from "./forecast";
+import { resolveForecast } from "./outcome";
 
 const MIN = 60000;
 type Db = ReturnType<typeof sql>;
@@ -58,6 +61,7 @@ export async function runTick(now = Date.now()) {
       const r = tfRes[i];
       if (r.status === "rejected") {
         notes.push(`${sym}: ${errMsg(r.reason)}`);
+        await recordHealth(db, s, sym, [`data fetch failed: ${errMsg(r.reason)}`], msgs).catch((e) => notes.push(`${sym} health: ${errMsg(e)}`));
         continue;
       }
       try {
@@ -65,6 +69,11 @@ export async function runTick(now = Date.now()) {
       } catch (e) {
         ok = false;
         notes.push(`${sym} detect: ${errMsg(e)}`);
+      }
+      try {
+        await resolveDue(db, s, sym, r.value, now);
+      } catch (e) {
+        notes.push(`${sym} outcomes: ${errMsg(e)}`);
       }
     }
 
@@ -109,9 +118,13 @@ export async function runTick(now = Date.now()) {
 
 async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], now: number, msgs: string[]) {
   const tfMs = s.timeframeMin * MIN;
-  const closed = all.filter((c) => c.t + tfMs <= now);
   const swing = s.detectionMode === "swing_pattern";
-  if (closed.length < (swing ? 10 : s.rangeLookback)) return;
+  // Data-quality gate: stale, gapped or inconsistent candles never reach detection, breakout scans or forecasts.
+  const q = checkCandles(all, { tfMs, now, window: swing ? Math.min(s.swingMaxCandles, 60) : s.rangeLookback, maxLagMs: 2 * tfMs + MIN, maxJumpPct: 20 });
+  await recordHealth(db, s, sym, q.ok ? [] : q.reasons, msgs);
+  if (!q.ok) return;
+  const closed = q.closed;
+  let fresh: { dir: "up" | "down"; high: number; low: number; width: number } | null = null;
 
   const active = await db`select * from range_alerts where symbol = ${sym} and timeframe_min = ${s.timeframeMin} and status = 'active'`;
   let stillActive = 0;
@@ -120,6 +133,7 @@ async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], 
     const after = closed.filter((c) => c.t > range.endT);
     const b = scanBreakout(after, range, tfMs, s.breakoutBufferPct, s.confirmCloses);
     if (b) {
+      if (b.confirmT === closed[closed.length - 1].t) fresh = { dir: b.direction, high: range.high, low: range.low, width: ((range.high - range.low) / ((range.high + range.low) / 2)) * 100 };
       const state = s.paperEnabled ? "pending" : "skipped";
       const note = s.paperEnabled ? null : "Paper trading was off";
       await db`update range_alerts set status = 'broken', breakout_direction = ${b.direction}, breakout_confirm_t = ${b.confirmT}, breakout_close = ${b.close}, broken_at = now(), paper_state = ${state}, paper_note = ${note} where id = ${a.id} and status = 'active'`;
@@ -133,6 +147,7 @@ async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], 
       await db`update range_alerts set status = 'expired' where id = ${a.id} and status = 'active'`;
     } else stillActive++;
   }
+  await logForecasts(db, s, sym, closed, fresh, now);
   if (stillActive > 0) return;
 
   const last = (await db`select window_end_t, breakout_confirm_t from range_alerts where symbol = ${sym} and timeframe_min = ${s.timeframeMin} order by id desc limit 1`)[0];
@@ -260,4 +275,70 @@ export async function closeTrade(db: Db, s: Settings, t: Row, refExit: number, r
   const why = ({ stop: "stop hit", profit_lock: "profit lock hit", target: "target hit", time: "time limit", manual: "closed manually" } as Record<string, string>)[reason] || reason;
   msgs?.push(`${m.net >= 0 ? "✅" : "❌"} SIMULATED ${dir.toUpperCase()} CLOSED: ${t.symbol} @ ${fmtPrice(fill)} (${why})\nSimulated P&L: ${fmtUsd(m.net, true)} after fees and slippage.\nSimulation only: not a real order.`);
   return true;
+}
+
+const roundTripCostPct = (s: Settings) => 2 * (s.feePct + s.slippagePct);
+
+// One forecast per horizon for the newest closed candle, including NO_SIGNAL, so every call (and every
+// non-call) can be scored later against baselines. Rows are append-only; a repeat tick for the same candle is a no-op.
+// This rule has NO calibrated probabilities (probs = null): it only says "closed beyond the range edge".
+async function logForecasts(db: Db, s: Settings, sym: string, closed: Candle[], fresh: { dir: "up" | "down"; high: number; low: number; width: number } | null, now: number) {
+  const last = closed[closed.length - 1];
+  const issuedT = last.t + s.timeframeMin * MIN;
+  const direction: Direction4 = fresh ? (fresh.dir === "up" ? "UP" : "DOWN") : "NO_SIGNAL";
+  for (const h of s.forecastHorizonsMin) {
+    const f = buildForecast({
+      symbol: sym,
+      timeframeMin: s.timeframeMin,
+      horizonMin: h,
+      issuedT,
+      now,
+      model: "range_breakout_v1",
+      direction,
+      probs: null,
+      refPrice: last.c,
+      costPct: roundTripCostPct(s),
+      invalidationPrice: fresh ? (fresh.dir === "up" ? fresh.high : fresh.low) : null,
+      features: fresh ? { rangeHigh: fresh.high, rangeLow: fresh.low, rangeWidthPct: fresh.width, bufferPct: s.breakoutBufferPct, confirmCloses: s.confirmCloses } : {},
+      evidence: fresh
+        ? `Observed: ${s.confirmCloses} closed ${s.timeframeMin}m candle(s) beyond the range edge. Inference: none calibrated yet; this rule has no measured edge.`
+        : "No breakout confirmed on the newest closed candle.",
+    });
+    await logForecast(db, f);
+  }
+}
+
+// Scores forecasts whose horizon is over, using only candles that closed at/before the horizon end.
+async function resolveDue(db: Db, s: Settings, sym: string, latest: Candle[], now: number) {
+  const tfMs = s.timeframeMin * MIN;
+  const due = await loadDueForecasts(db, sym, s.timeframeMin, now);
+  if (!due.length) return;
+  let candles = latest;
+  const oldest = Math.min(...due.map((d: Row) => Number(d.issued_t) + Number(d.horizon_min) * MIN - tfMs));
+  if (latest.length && oldest < latest[0].t) {
+    // rare: the app was down longer than the latest-candles window; fetch the missing stretch once
+    const r = await fetchCandlesRange(s.provider, sym, s.timeframeMin, oldest, latest[0].t);
+    candles = [...r.candles, ...latest];
+  }
+  for (const d of due) {
+    const res = resolveForecast(
+      { issuedT: Number(d.issued_t), horizonMin: Number(d.horizon_min), refPrice: Number(d.ref_price) },
+      candles,
+      now,
+      { tfMs, costPct: Number(d.cost_pct), minMovePct: s.minMovePct },
+    );
+    if (res.status === "resolved") await saveOutcome(db, Number(d.id), { actual: res.actual, endT: res.endT, endPrice: res.endPrice, returnPct: res.returnPct, thresholdPct: res.thresholdPct });
+    else if (res.status === "unresolvable") await saveOutcome(db, Number(d.id), { actual: "UNRESOLVABLE", endT: null, endPrice: null, returnPct: null, thresholdPct: null });
+  }
+}
+
+// Health is stored per symbol; a message is sent only when it changes (problem appears, changes, or clears).
+async function recordHealth(db: Db, s: Settings, sym: string, reasons: string[], msgs: string[]) {
+  const text = reasons.join("; ").slice(0, 400);
+  const ok = reasons.length === 0;
+  const prev = (await db`select ok, reasons from data_health where symbol = ${sym} and timeframe_min = ${s.timeframeMin}`)[0];
+  await db`insert into data_health (symbol, timeframe_min, ok, reasons) values (${sym}, ${s.timeframeMin}, ${ok}, ${text})
+    on conflict (symbol, timeframe_min) do update set ok = excluded.ok, reasons = excluded.reasons, updated_at = now()`;
+  if (ok && prev && !prev.ok) msgs.push(`✅ DATA OK AGAIN: ${sym} ${s.timeframeMin}m. Signals and forecasts have resumed.`);
+  else if (!ok && (!prev || prev.ok || prev.reasons !== text)) msgs.push(`⚠️ DATA PROBLEM: ${sym} ${s.timeframeMin}m\n${text}\nNo signals or forecasts for this symbol until the data is healthy.`);
 }

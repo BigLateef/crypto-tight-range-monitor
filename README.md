@@ -33,6 +33,13 @@ Next.js 14 + TypeScript + Neon Postgres. Watches public candle data for tight ra
    every 5 minutes at minutes 1,6,11,...,56 (custom schedule; one minute after each 5m candle closes), method GET, Advanced > Headers: `Authorization: Bearer <your CRON_SECRET>` (or, if headers are awkward, put `?cron_secret=<your CRON_SECRET>` on the URL). Test run should return JSON with `"ok":true`.
 4. Open the app, sign in, check Settings, and watch the Portfolio page. Set "Cron interval" in Settings to match your schedule; it warns when the engine has missed two intervals. Exits and entries are evaluated once per tick, so they can lag by up to one interval.
 
+## Forecast ledger and data gate (new)
+- Run `sql/004_forecasts.sql` once (safe to re-run). It adds `forecasts` (append-only: UPDATE/DELETE are rejected by a trigger), `forecast_outcomes` and `data_health`.
+- Every tick, per symbol and per horizon in Settings JSON key `forecastHorizonsMin` (default 60 and 240 minutes, must be multiples of the candle length), the engine logs one forecast for the newest closed candle: UP, DOWN or NO_SIGNAL. The current rule (`range_breakout_v1`) has **no calibrated probabilities** (they are stored as null) and **no measured edge**; step 5 of the plan adds a probability model that must beat baselines out of sample.
+- Target: return% from the forecast's reference close to the close at issued time + horizon. UP/DOWN if the move exceeds the larger of round-trip cost (2 x (fee + slippage)) and `minMovePct`; otherwise SIDEWAYS. Outcomes use only candles that closed by the horizon end; a missing end candle becomes UNRESOLVABLE after 6 hours, never a guess.
+- Data gate: stale, gapped, duplicated, malformed or jumpy candles block detection, breakout scans and forecasts for that symbol. A Telegram message is sent only when a symbol's data health changes (problem, changed problem, recovery).
+- Not yet done: backtest/eval command, probability model, alert outbox with retries and cooldown, a Settings-page field for horizons.
+
 ## Files
 - `lib/range.ts`, `lib/paper.ts`, `lib/config.ts`: pure logic, tested with `npm test` (`node --experimental-strip-types`).
 - `lib/engine.ts`: one tick (detect, confirm, exits, entries, snapshot). `app/api/tick` is the cron target.
