@@ -152,11 +152,12 @@ export default function Settings() {
 
       <fieldset>
         <legend>Risk</legend>
-        <p className="muted" style={{ fontSize: 13 }}>Size is set so a stop-out loses this share of equity including all costs, capped at your available virtual cash (spot style; margin and leverage are not simulated yet).</p>
+        <p className="muted" style={{ fontSize: 13 }}>The values shown are placeholders, not a recommendation. Size is set so a stop-out loses this share of equity including all costs, capped at your available virtual cash (spot style; margin and leverage are not simulated yet).</p>
         <div className="two">
           <Num s={s} set={set} k="riskPct" label="Risk per trade (% of equity)" />
           <Num s={s} set={set} k="dailyLossLimitPct" label="Daily loss limit (% of equity)" />
         </div>
+        <Tog s={s} set={set} k="riskConfirmed" label="I chose these risk values (no paper entries open until ticked)" />
       </fieldset>
 
       <fieldset>

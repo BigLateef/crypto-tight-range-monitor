@@ -164,7 +164,7 @@ async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], 
       `Stop ${fmtPrice(st.stopPrice)} (${st.stopPct.toFixed(2)}%) / Target ${fmtPrice(st.targetPrice)} (${st.targetPct.toFixed(2)}%).\n` +
       `After costs: a win keeps ${e.netWinPct.toFixed(2)}%, a loss costs ${e.netLossPct.toFixed(2)}% (net R:R ${e.netRR.toFixed(2)}). Needs a win rate above ${(e.breakEvenWinRate * 100).toFixed(0)}% to break even. No proven edge: this is a hypothesis under test.\n` +
       `Invalid if a ${s.timeframeMin}m candle closes beyond ${fmtPrice(st.invalidationPrice)}. Do not chase: skip it if price has already run ${s.maxChasePct}% from ${fmtPrice(st.refPrice)}.\n` +
-      `Data: ${s.timeframeMin}m and 1h candles fresh, checked this minute.${s.costsConfirmed ? "" : "\n⚠️ Fees are still PLACEHOLDERS. Enter your real fees in Settings and tick 'confirmed'."}\n` +
+      `Data: ${s.timeframeMin}m and 1h candles fresh, checked this minute.${s.costsConfirmed ? "" : "\n⚠️ Fees are still PLACEHOLDERS. Enter your real fees in Settings and tick 'confirmed'."}${s.riskConfirmed ? "" : "\n⚠️ Risk per trade and daily loss limit are unconfirmed: no paper entry will open."}\n` +
       `${s.paperEnabled ? "Paper trading: checking for a simulated entry." : "Paper trading is off: alert only."}\nAlert only: not a real order, not financial advice.`,
   );
 }
@@ -176,6 +176,7 @@ async function tryEnter(db: Db, s: Settings, a: Row, prices: Record<string, numb
     if (why !== "Paper trading was off") msgs.push(`⚪ NO SIMULATED ${dir.toUpperCase()} ENTRY: ${a.symbol}\nReason: ${why}.`);
   };
   if (!s.paperEnabled) return skip("Paper trading was off");
+  if (!s.riskConfirmed) return skip("Risk per trade and daily loss limit are not confirmed yet. Set your own values in Settings and tick confirmed; no paper entry opens until then");
   if (dir === "long" && !s.allowLong) return skip("Long entries are disabled");
   if (dir === "short" && !s.allowShort) return skip("Short entries are disabled");
   const open = await db`select symbol from paper_trades where status = 'open'`;

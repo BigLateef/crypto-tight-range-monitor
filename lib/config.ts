@@ -32,6 +32,7 @@ export interface Settings {
   spreadPct: number;
   fundingPctPer8h: number; // perps only; 0 for spot
   targetFill: TargetFill;
+  riskConfirmed: boolean; // false = riskPct and dailyLossLimitPct are placeholders, so no paper entry opens
   costsConfirmed: boolean; // false = fees are still placeholders and every alert says so
   maxHoldMinutes: number;
   lockEnabled: boolean;
@@ -61,6 +62,7 @@ export const DEFAULTS: Settings = {
   maxEntryDelaySec: 240,
   tickIntervalMin: 1,
   startingBalance: 10000,
+  // PLACEHOLDERS, not your choice. Paper entries stay off until you set your own values and confirm them.
   riskPct: 1,
   dailyLossLimitPct: 3,
   maxOpenPositions: 3,
@@ -71,6 +73,7 @@ export const DEFAULTS: Settings = {
   spreadPct: 0.01,
   fundingPctPer8h: 0,
   targetFill: "taker",
+  riskConfirmed: false,
   costsConfirmed: false,
   maxHoldMinutes: 240,
   lockEnabled: false,
@@ -94,7 +97,7 @@ const NUM: Record<string, [number, number, boolean]> = {
   maxEntryDelaySec: [30, 3600, true],
   tickIntervalMin: [1, 30, true],
   startingBalance: [100, 1e9, false],
-  riskPct: [0.1, 5, false],
+  riskPct: [0.1, 25, false],
   dailyLossLimitPct: [0.1, 25, false],
   maxOpenPositions: [1, 20, true],
   takerFeePct: [0, 2, false],
@@ -107,7 +110,7 @@ const NUM: Record<string, [number, number, boolean]> = {
   lockProfitPct: [0, 50, false],
   minMovePct: [0, 20, false],
 };
-const BOOL = ["paperEnabled", "allowLong", "allowShort", "lockEnabled", "costsConfirmed"];
+const BOOL = ["paperEnabled", "allowLong", "allowShort", "lockEnabled", "costsConfirmed", "riskConfirmed"];
 const ENUM: Record<string, string[]> = {
   provider: ["coinbase", "binance"],
   targetFill: ["maker", "taker"],

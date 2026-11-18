@@ -34,6 +34,8 @@ console.log("timeframe tests passed");
 // retest settings
 assert.equal(DEFAULTS.costsConfirmed, false, "fees start as unconfirmed placeholders");
 assert.equal(validateSettings({ minStopPct: 2, maxStopPct: 1 }).ok, false);
-assert.equal(validateSettings({ riskPct: 10 }).ok, false);
+assert.equal(DEFAULTS.riskConfirmed, false, "risk values start as unconfirmed placeholders");
+assert.equal(validateSettings({ riskPct: 10 }).ok, true);
+assert.equal(validateSettings({ riskPct: 30 }).ok, false);
 assert.equal(validateSettings({ riskPct: 1.5, dailyLossLimitPct: 3, minPriorBounces: 3, zoneTfMin: 240 }).ok, true);
 console.log("retest settings tests passed");
