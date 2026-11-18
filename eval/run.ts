@@ -5,6 +5,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fetchCandlesRange } from "../lib/provider.ts";
 import type { Candle } from "../lib/types";
+import { DEFAULT_RETEST_EVAL, renderRetestReport, runRetestEval, type RetestEvalConfig } from "./retest.ts";
 import { DEFAULT_EVAL, chooseHoldoutStart, renderReport, runEval, type EvalConfig } from "./core.ts";
 
 const argv = process.argv.slice(2);
@@ -19,9 +20,11 @@ const num = (n: string, d: number) => {
   return v;
 };
 
+const strategy = opt("strategy", "forecast");
 const ROOT = path.resolve(import.meta.dirname, "..");
 const symbols = opt("symbols", "BTC-USD,ETH-USD,SOL-USD").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
 const tfMin = num("tf", 5);
+if (!["forecast", "retest"].includes(strategy)) throw new Error("--strategy must be forecast or retest");
 const horizons = opt("horizons", "60,240").split(",").map(Number);
 const days = num("days", 60);
 const provider = opt("provider", "coinbase") as "coinbase" | "binance";
@@ -99,6 +102,46 @@ async function main() {
   }
   if (final && lock.finalRuns >= 1 && !flag("accept-reuse")) {
     throw new Error(`the holdout was already scored ${lock.finalRuns} time(s). Scoring it again means it is no longer untouched. Re-run with --final --accept-reuse only if you accept that.`);
+  }
+
+  if (strategy === "retest") {
+    const d = DEFAULT_RETEST_EVAL;
+    const rcfg: RetestEvalConfig = {
+      ...d,
+      ltfMin: tfMin,
+      htfMin: num("htf", d.htfMin),
+      costs: {
+        takerFeePct: num("taker", d.costs.takerFeePct),
+        makerFeePct: num("maker", d.costs.makerFeePct),
+        slippagePct: num("slip", d.costs.slippagePct),
+        spreadPct: num("spread", d.costs.spreadPct),
+        fundingPct: num("funding", d.costs.fundingPct),
+        targetFill: opt("target-fill", d.costs.targetFill) === "maker" ? "maker" : "taker",
+      },
+      delayCandles: num("delay", d.delayCandles),
+      arms: opt("arms", d.arms.join(",")).split(",").map(Number),
+      primaryArm: num("primary", d.primaryArm),
+      holdoutStartT: lock.holdoutStartT,
+      mode: final ? "final" : "dev",
+      folds: num("folds", d.folds),
+      minTrades: num("min-trades", d.minTrades),
+      alpha: num("alpha", d.alpha),
+      riskPct: num("risk", d.riskPct),
+    };
+    if (!rcfg.arms.includes(rcfg.primaryArm)) throw new Error("--primary must be one of --arms");
+    if (!argv.includes("--taker")) console.log("WARNING: fees are PLACEHOLDERS (taker 0.1%). Pass your real --taker/--maker/--slip/--spread/--funding values; results below are not meaningful until you do.");
+    const res = runRetestEval(data, rcfg);
+    console.log("\n" + renderRetestReport(res, rcfg, { symbols, firstT, lastT }));
+    fs.mkdirSync(path.join(ROOT, "eval/out"), { recursive: true });
+    const rjson = JSON.stringify({ cfg: rcfg, res }, null, 2);
+    fs.writeFileSync(path.join(ROOT, "eval/out/latest.json"), rjson);
+    if (final) {
+      lock.finalRuns++;
+      lock.finalLog.push({ at: new Date().toISOString(), resultSha256: crypto.createHash("sha256").update(rjson).digest("hex"), strategy: "retest" });
+      fs.writeFileSync(lockPath, JSON.stringify(lock, null, 2) + "\n");
+      console.log(`\nholdout scored (run #${lock.finalRuns}); recorded in ${path.relative(ROOT, lockPath)}`);
+    }
+    return;
   }
 
   const cfg: EvalConfig = {

@@ -65,3 +65,19 @@ Options: `--tf 5 --horizons 60,240 --fee 0.1 --slip 0.05 --delay 1 --min-trades 
 - Largest drawdown comes from equity snapshots (every tick while positions are open, else every 15 min).
 - Hobby functions cap at 10s; `/api/tick` makes parallel public-data calls with 3.5s timeouts. Keep the watchlist small.
 - Provider candle endpoints (Coinbase Exchange, data-api.binance.vision) are public but unverified against live data here.
+
+## Retest-zone strategy: replay backtest (research only)
+
+Detects HTF (1h) support/resistance zones from observed pivots, counts completed bounces and breaks, and requires a closed 5m rejection candle before a setup exists. No chasing, stop beyond the zone, and a net R:R check after costs. It never places orders.
+
+```
+npm run eval -- --strategy retest --symbols BTC-USD,ETH-USD,SOL-USD --days 90 \
+  --taker <your taker %> --maker <your maker %> --slip <%> --spread <%> --funding <% per trade, perps>
+# final, once, on the locked holdout:
+npm run eval -- --strategy retest --final --taker ... 
+```
+
+- **Fees default to PLACEHOLDERS (taker 0.1%).** They are not your real fees. Get your tier from your exchange's fee page and pass them in; the CLI warns if you don't.
+- Arms of 0/1/2/3 prior bounces are compared; the primary arm (2) is declared in advance. Two bounces are a hypothesis being tested, not a guarantee.
+- The verdict is one of INSUFFICIENT DATA / NO EDGE DEMONSTRATED / POSITIVE BUT NOT BETTER THAN A COIN-FLIP DIRECTION / PASSES ON THIS SAMPLE (needs 100+ primary trades).
+- Tested only on synthetic data (random walks lose to costs, as they should). No real-market result exists yet; run the command with network access. Not financial advice.
