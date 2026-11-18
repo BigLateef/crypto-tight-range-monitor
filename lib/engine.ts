@@ -1,13 +1,12 @@
-// One tick = detect ranges, confirm breakouts, manage simulated exits, open simulated entries.
+// One tick = find retest-zone setups, alert once per setup, manage simulated exits, open simulated entries.
 // SIMULATION ONLY. Market data is read-only; nothing here can place an order anywhere.
 import { sql, type Row } from "./db";
 import { loadSettings } from "./settings";
 import type { Settings } from "./config";
 import type { Candle, Direction } from "./types";
 import { fetchLatestCandles, fetchCandlesRange, fetchPrice } from "./provider";
-import { detectRange, scanBreakout } from "./range";
-import { detectSwingPattern } from "./swing";
-import { slipPrice, levels, sizePosition, replayCandles, closeMath } from "./paper";
+import { slipPrice, replayCandles, closeMath } from "./paper";
+import { ZONE_DEFAULTS, TRIGGER_DEFAULTS, buildZones, evaluateTrigger, inCooldown, planEntry, costsFromSettings, resample, type Setup } from "./retest";
 import { loadAccount, markOpen } from "./account";
 import { sendTelegram } from "./telegram";
 import { fmtPrice, fmtUsd } from "./format";
@@ -34,8 +33,9 @@ export async function runTick(now = Date.now()) {
     const endBoundary = Math.floor(now / MIN) * MIN;
 
     // Stage A: all network reads in parallel (read-only public market data)
-    const [tfRes, exitRes] = await Promise.all([
+    const [tfRes, htfRes, exitRes] = await Promise.all([
       Promise.allSettled(s.symbols.map((sym) => fetchLatestCandles(s.provider, sym, s.timeframeMin))),
+      Promise.allSettled(s.symbols.map((sym) => fetchLatestCandles(s.provider, sym, 60))), // zones are built from 1h (4h is resampled from it)
       Promise.all(
         openSyms.map(async (sym) => {
           const mine = openAtStart.filter((t: Row) => t.symbol === sym);
@@ -55,7 +55,7 @@ export async function runTick(now = Date.now()) {
       scans[x.sym] = x.rng;
     }
 
-    // Stage B1: range discovery + breakout confirmation (closed candles only)
+    // Stage B1: retest-zone setups on the newest closed trigger candle (closed candles only)
     for (let i = 0; i < s.symbols.length; i++) {
       const sym = s.symbols[i];
       const r = tfRes[i];
@@ -64,8 +64,14 @@ export async function runTick(now = Date.now()) {
         await recordHealth(db, s, sym, [`data fetch failed: ${errMsg(r.reason)}`], msgs).catch((e) => notes.push(`${sym} health: ${errMsg(e)}`));
         continue;
       }
+      const h = htfRes[i];
+      if (h.status === "rejected") {
+        notes.push(`${sym} 1h: ${errMsg(h.reason)}`);
+        await recordHealth(db, s, sym, [`zone-timeframe data fetch failed: ${errMsg(h.reason)}`], msgs).catch((e) => notes.push(`${sym} health: ${errMsg(e)}`));
+        continue;
+      }
       try {
-        await detectForSymbol(db, s, sym, r.value, now, msgs);
+        await detectForSymbol(db, s, sym, r.value, h.value, now, msgs);
       } catch (e) {
         ok = false;
         notes.push(`${sym} detect: ${errMsg(e)}`);
@@ -87,8 +93,8 @@ export async function runTick(now = Date.now()) {
       }
     }
 
-    // Stage B3: simulated entries for confirmed breakouts
-    const pending = await db`select * from range_alerts where status = 'broken' and paper_state = 'pending' order by id`;
+    // Stage B3: simulated entries for fresh setups
+    const pending = await db`select * from retest_setups where paper_state = 'pending' order by id`;
     for (const a of pending) {
       try {
         await tryEnter(db, s, a, prices, now, msgs);
@@ -116,71 +122,62 @@ export async function runTick(now = Date.now()) {
   return { ok, notes };
 }
 
-async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], now: number, msgs: string[]) {
+async function detectForSymbol(db: Db, s: Settings, sym: string, all: Candle[], htfAll: Candle[], now: number, msgs: string[]) {
   const tfMs = s.timeframeMin * MIN;
-  const swing = s.detectionMode === "swing_pattern";
-  // Data-quality gate: stale, gapped or inconsistent candles never reach detection, breakout scans or forecasts.
-  const q = checkCandles(all, { tfMs, now, window: swing ? Math.min(s.swingMaxCandles, 60) : s.rangeLookback, maxLagMs: Math.max(2 * tfMs + MIN, 6 * MIN), maxJumpPct: 20 });
-  await recordHealth(db, s, sym, q.ok ? [] : q.reasons, msgs);
-  if (!q.ok) return;
+  const HOUR = 60 * MIN;
+  // Data-quality gate on BOTH timeframes: stale, gapped or inconsistent candles never reach zone building,
+  // the trigger, or forecasts. A failed gate means "no signal", never a normal-looking one.
+  const q = checkCandles(all, { tfMs, now, window: 60, maxLagMs: Math.max(2 * tfMs + MIN, 6 * MIN), maxJumpPct: 20 });
+  const qh = checkCandles(htfAll, { tfMs: HOUR, now, window: 48, maxLagMs: 2 * HOUR + 5 * MIN, maxJumpPct: 30 });
+  const reasons = [...(q.ok ? [] : q.reasons.map((r) => `${s.timeframeMin}m: ${r}`)), ...(qh.ok ? [] : qh.reasons.map((r) => `1h: ${r}`))];
+  await recordHealth(db, s, sym, reasons, msgs);
+  if (reasons.length) return;
   const closed = q.closed;
-  let fresh: { dir: "up" | "down"; high: number; low: number; width: number } | null = null;
 
-  const active = await db`select * from range_alerts where symbol = ${sym} and timeframe_min = ${s.timeframeMin} and status = 'active'`;
-  let stillActive = 0;
-  for (const a of active) {
-    const range = { high: Number(a.range_high), low: Number(a.range_low), endT: Number(a.window_end_t) };
-    const after = closed.filter((c) => c.t > range.endT);
-    const b = scanBreakout(after, range, tfMs, s.breakoutBufferPct, s.confirmCloses);
-    if (b) {
-      if (b.confirmT === closed[closed.length - 1].t) fresh = { dir: b.direction, high: range.high, low: range.low, width: ((range.high - range.low) / ((range.high + range.low) / 2)) * 100 };
-      const state = s.paperEnabled ? "pending" : "skipped";
-      const note = s.paperEnabled ? null : "Paper trading was off";
-      await db`update range_alerts set status = 'broken', breakout_direction = ${b.direction}, breakout_confirm_t = ${b.confirmT}, breakout_close = ${b.close}, broken_at = now(), paper_state = ${state}, paper_note = ${note} where id = ${a.id} and status = 'active'`;
-      const above = b.direction === "up";
-      msgs.push(
-        above
-          ? `🟢 LONG SIGNAL: ${sym} ${s.timeframeMin}m\nPrice closed ABOVE the range high (${fmtPrice(range.high)}) at ${fmtPrice(b.close)}.\nDirection: LONG (buy).\n${s.paperEnabled ? "Paper trading: checking for a simulated LONG entry." : "Paper trading is off: no simulated entry."}`
-          : `🔴 SHORT SIGNAL: ${sym} ${s.timeframeMin}m\nPrice closed BELOW the range low (${fmtPrice(range.low)}) at ${fmtPrice(b.close)}.\nDirection: SHORT (sell).\n${s.paperEnabled ? "Paper trading: checking for a simulated SHORT entry." : "Paper trading is off: no simulated entry."}`,
-      );
-    } else if (after.length >= s.rangeExpireCandles) {
-      await db`update range_alerts set status = 'expired' where id = ${a.id} and status = 'active'`;
-    } else stillActive++;
-  }
-  await logForecasts(db, s, sym, closed, fresh, now);
-  if (stillActive > 0) return;
+  const zoneMs = s.zoneTfMin * MIN;
+  const htf = s.zoneTfMin === 60 ? qh.closed : resample(qh.closed, zoneMs, now);
+  const zp = { ...ZONE_DEFAULTS, minPriorBounces: s.minPriorBounces };
+  const tp = { ...TRIGGER_DEFAULTS, minWickFrac: s.minWickFrac, maxChasePct: s.maxChasePct, stopBufferPct: s.stopBufferPct, minStopPct: s.minStopPct, maxStopPct: s.maxStopPct, targetPct: s.targetPct, minNetRR: s.minNetRR, cooldownMin: s.cooldownMin };
+  const costs = costsFromSettings(s);
+  const built = buildZones(htf, zp);
+  const ev = built.zones.length ? evaluateTrigger(built.zones, built.atrNow, closed.slice(-(Math.max(tp.approachBars, tp.volLookback) + 2)), tfMs, zp, tp, costs) : { setup: null as Setup | null, skipped: [] };
 
-  const last = (await db`select window_end_t, breakout_confirm_t from range_alerts where symbol = ${sym} and timeframe_min = ${s.timeframeMin} order by id desc limit 1`)[0];
-  const minStartT = last ? Number(last.breakout_confirm_t ?? last.window_end_t) + 1 : 0;
-  const r = swing
-    ? detectSwingPattern(closed, { minPct: s.swingMinPct, bandTolPct: s.swingBandTolPct, maxCandles: s.swingMaxCandles }, minStartT)
-    : detectRange(closed, { lookback: s.rangeLookback, maxWidthPct: s.rangeMaxWidthPct, minTouches: s.rangeMinTouches, touchTolPct: s.rangeTouchTolPct }, minStartT);
-  if (!r) return;
-  const ins = await db`insert into range_alerts (symbol, timeframe_min, range_high, range_low, width_pct, touches_high, touches_low, window_candles, window_start_t, window_end_t)
-    values (${sym}, ${s.timeframeMin}, ${r.high}, ${r.low}, ${r.widthPct}, ${r.touchesHigh}, ${r.touchesLow}, ${r.candles}, ${r.startT}, ${r.endT})
-    on conflict (symbol, timeframe_min, window_end_t) do nothing returning id`;
-  if (ins.length) {
-    msgs.push(
-      swing
-        ? `🟡 SWING PATTERN FOUND: ${sym} ${s.timeframeMin}m\n${r.touchesHigh} back-and-forth swing cycles in a row inside a band (each swing at least ${s.swingMinPct}%; the cycle count is found automatically).\nRange: ${fmtPrice(r.low)} - ${fmtPrice(r.high)} (${r.widthPct.toFixed(2)}% wide)\nDirection: NOT KNOWN YET. No trade. Wait for a LONG or SHORT signal.`
-        : `🟡 RANGE FOUND: ${sym} ${s.timeframeMin}m\nRange: ${fmtPrice(r.low)} - ${fmtPrice(r.high)} (${r.widthPct.toFixed(2)}% wide)\nDirection: NOT KNOWN YET. No trade. Wait for a LONG or SHORT signal.`,
-    );
-  }
+  await logForecasts(db, s, sym, closed, ev.setup, now);
+  const st = ev.setup;
+  if (!st) return; // "no clear edge": silence is the normal outcome
+  if (st.dir === "long" ? !s.allowLong : !s.allowShort) return;
+
+  // Cooldown: the same direction on an overlapping zone is not re-alerted within cooldownMin.
+  const recent = await db`select dir, close_t, zone_low, zone_high from retest_setups where symbol = ${sym} and close_t > ${st.closeT - s.cooldownMin * MIN} order by id desc limit 50`;
+  const prev = recent.map((r: Row) => ({ dir: String(r.dir), closeT: Number(r.close_t), zoneLow: Number(r.zone_low), zoneHigh: Number(r.zone_high) }));
+  if (inCooldown(prev, st, s.cooldownMin)) return;
+
+  const ins = await db`insert into retest_setups (symbol, trigger_tf_min, zone_tf_min, dir, trigger_t, close_t, ref_price, zone_low, zone_high, prior_bounces, stop_price, target_price, stop_pct, target_pct, net_rr, break_even_win_rate, invalidation_price, evidence, costs, costs_confirmed)
+    values (${sym}, ${s.timeframeMin}, ${s.zoneTfMin}, ${st.dir}, ${st.triggerT}, ${st.closeT}, ${st.refPrice}, ${st.zoneLow}, ${st.zoneHigh}, ${st.priorBounces}, ${st.stopPrice}, ${st.targetPrice}, ${st.stopPct}, ${st.targetPct}, ${st.economics.netRR}, ${st.economics.breakEvenWinRate}, ${st.invalidationPrice}, ${st.evidence}, ${JSON.stringify(costs)}::jsonb, ${s.costsConfirmed})
+    on conflict (symbol, trigger_tf_min, dir, trigger_t) do nothing returning id`;
+  if (!ins.length) return; // already alerted for this candle (repeat tick or retried cron)
+  const e = st.economics;
+  const long = st.dir === "long";
+  msgs.push(
+    `${long ? "🟢" : "🔴"} RETEST ${long ? "LONG" : "SHORT"} SETUP: ${sym} (${s.zoneTfMin === 60 ? "1h" : "4h"} zone, ${s.timeframeMin}m trigger)\n` +
+      `Zone ${fmtPrice(st.zoneLow)} - ${fmtPrice(st.zoneHigh)}: ${st.priorBounces} earlier bounce(s) counted from price behavior, then a confirmed rejection on the last closed ${s.timeframeMin}m candle at ${fmtPrice(st.refPrice)}.\n` +
+      `Stop ${fmtPrice(st.stopPrice)} (${st.stopPct.toFixed(2)}%) / Target ${fmtPrice(st.targetPrice)} (${st.targetPct.toFixed(2)}%).\n` +
+      `After costs: a win keeps ${e.netWinPct.toFixed(2)}%, a loss costs ${e.netLossPct.toFixed(2)}% (net R:R ${e.netRR.toFixed(2)}). Needs a win rate above ${(e.breakEvenWinRate * 100).toFixed(0)}% to break even. No proven edge: this is a hypothesis under test.\n` +
+      `Invalid if a ${s.timeframeMin}m candle closes beyond ${fmtPrice(st.invalidationPrice)}. Do not chase: skip it if price has already run ${s.maxChasePct}% from ${fmtPrice(st.refPrice)}.\n` +
+      `Data: ${s.timeframeMin}m and 1h candles fresh, checked this minute.${s.costsConfirmed ? "" : "\n⚠️ Fees are still PLACEHOLDERS. Enter your real fees in Settings and tick 'confirmed'."}\n` +
+      `${s.paperEnabled ? "Paper trading: checking for a simulated entry." : "Paper trading is off: alert only."}\nAlert only: not a real order, not financial advice.`,
+  );
 }
 
 async function tryEnter(db: Db, s: Settings, a: Row, prices: Record<string, number>, now: number, msgs: string[]) {
+  const dir: Direction = a.dir === "long" ? "long" : "short";
   const skip = async (why: string) => {
-    await db`update range_alerts set paper_state = 'skipped', paper_note = ${why} where id = ${a.id}`;
-    if (why !== "Paper trading was off") msgs.push(`⚪ NO SIMULATED ${a.breakout_direction === "up" ? "LONG" : "SHORT"} ENTRY: ${a.symbol}\nReason: ${why}.`);
+    await db`update retest_setups set paper_state = 'skipped', paper_note = ${why} where id = ${a.id}`;
+    if (why !== "Paper trading was off") msgs.push(`⚪ NO SIMULATED ${dir.toUpperCase()} ENTRY: ${a.symbol}\nReason: ${why}.`);
   };
   if (!s.paperEnabled) return skip("Paper trading was off");
-  const dir: Direction = a.breakout_direction === "up" ? "long" : "short";
   if (dir === "long" && !s.allowLong) return skip("Long entries are disabled");
   if (dir === "short" && !s.allowShort) return skip("Short entries are disabled");
-  const closeTime = Number(a.breakout_confirm_t) + Number(a.timeframe_min) * MIN;
-  const lateSec = Math.round((now - closeTime) / 1000);
-  const maxDelaySec = Math.max(s.maxEntryDelaySec, s.tickIntervalMin * 60 + 60); // a slow cron must not make every entry "late"
-  if (lateSec > maxDelaySec) return skip(`Entry window missed (${lateSec}s after the confirming close, limit ${maxDelaySec}s)`);
   const open = await db`select symbol from paper_trades where status = 'open'`;
   if (open.length >= s.maxOpenPositions) return skip("Max open positions reached");
   if (open.some((o: Row) => o.symbol === a.symbol)) return skip("Already holding this symbol");
@@ -190,34 +187,41 @@ async function tryEnter(db: Db, s: Settings, a: Row, prices: Record<string, numb
     try {
       price = await fetchPrice(s.provider, a.symbol);
     } catch {
+      if (now - Number(a.close_t) > s.maxEntryDelaySec * 1000) return skip("Entry window missed and no live price");
       return; // leave pending; retried next tick until the entry window closes
     }
   }
-  const high = Number(a.range_high);
-  const low = Number(a.range_low);
-  if (dir === "long" ? price <= high : price >= low) return skip("Price was back inside the range at entry time");
-
-  const fill = slipPrice(price, dir, "entry", s.slippagePct);
-  const lv = levels(dir, fill, { high, low }, s);
-  if (lv.error) return skip(lv.error);
-
   const acct = await loadAccount(s.startingBalance);
   const openRows = await db`select * from paper_trades where status = 'open'`;
   const equity = acct.cash + markOpen(openRows, prices).value;
-  const sz = sizePosition({ mode: s.sizingMode, equity, cash: acct.cash, entry: fill, stop: lv.stop, fixedUsd: s.fixedUsd, pctEquity: s.pctEquity, riskPct: s.riskPct, feePct: s.feePct });
-  if (!sz.units) return skip("Not enough virtual cash, or size too small");
+
+  // Daily loss limit: realized loss since 00:00 UTC. Reached = no new entries until tomorrow.
+  const day = new Date(now);
+  const dayStart = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+  const lost = (await db`select coalesce(sum(realized_pnl), 0) as p from paper_trades where status = 'closed' and closed_at >= to_timestamp(${dayStart / 1000})`)[0];
+  const limitUsd = (equity * s.dailyLossLimitPct) / 100;
+  if (Number(lost.p) <= -limitUsd) return skip(`Daily loss limit reached (${fmtUsd(Number(lost.p), true)} today, limit ${s.dailyLossLimitPct}% = ${fmtUsd(-limitUsd)})`);
+
+  const maxDelaySec = Math.max(s.maxEntryDelaySec, s.tickIntervalMin * 60 + 60); // a slow cron must not make every entry "late"
+  const costs = costsFromSettings(s);
+  const plan = planEntry({
+    setup: { dir, closeT: Number(a.close_t), refPrice: Number(a.ref_price), stopPrice: Number(a.stop_price), targetPrice: Number(a.target_price) },
+    livePrice: price, now, equity, cash: acct.cash, costs, riskPct: s.riskPct, minStopPct: s.minStopPct, maxStopPct: s.maxStopPct, minNetRR: s.minNetRR, maxChasePct: s.maxChasePct, maxDelaySec,
+  });
+  if (!plan.ok) return skip(plan.why);
 
   const g = dir === "long" ? 1 : -1;
-  const lockTrigger = s.lockEnabled ? fill * (1 + (g * s.lockTriggerPct) / 100) : null;
-  const lockStop = s.lockEnabled ? fill * (1 + (g * s.lockProfitPct) / 100) : null;
-  const fee = (sz.notional * s.feePct) / 100;
-  const slipUsd = Math.abs(fill - price) * sz.units;
+  const lockTrigger = s.lockEnabled ? plan.fill * (1 + (g * s.lockTriggerPct) / 100) : null;
+  const lockStop = s.lockEnabled ? plan.fill * (1 + (g * s.lockProfitPct) / 100) : null;
+  const slipUsd = Math.abs(plan.fill - price) * plan.units;
+  const stop = Number(a.stop_price);
+  const target = Number(a.target_price);
   const checked = Math.ceil(now / MIN) * MIN; // the entry minute is never scanned for exits
-  const ins = await db`insert into paper_trades (alert_id, symbol, direction, units, notional, ref_entry_price, entry_price, entry_slippage_usd, entry_fee, stop_price, initial_stop_price, target_price, lock_trigger_price, lock_stop_price, max_hold_minutes, opened_at, checked_through, last_price, last_price_at)
-    values (${a.id}, ${a.symbol}, ${dir}, ${sz.units}, ${sz.notional}, ${price}, ${fill}, ${slipUsd}, ${fee}, ${lv.stop}, ${lv.stop}, ${lv.target}, ${lockTrigger}, ${lockStop}, ${s.maxHoldMinutes}, to_timestamp(${now / 1000}), ${checked}, ${price}, now())
+  const ins = await db`insert into paper_trades (setup_id, symbol, direction, units, notional, ref_entry_price, entry_price, entry_slippage_usd, entry_fee, stop_price, initial_stop_price, target_price, lock_trigger_price, lock_stop_price, max_hold_minutes, opened_at, checked_through, last_price, last_price_at)
+    values (${a.id}, ${a.symbol}, ${dir}, ${plan.units}, ${plan.notional}, ${price}, ${plan.fill}, ${slipUsd}, ${plan.entryFee}, ${stop}, ${stop}, ${target}, ${lockTrigger}, ${lockStop}, ${s.maxHoldMinutes}, to_timestamp(${now / 1000}), ${checked}, ${price}, now())
     returning id`;
-  await db`update range_alerts set paper_state = 'entered', paper_note = null, trade_id = ${ins[0].id} where id = ${a.id}`;
-  msgs.push(`${dir === "long" ? "🟢" : "🔴"} SIMULATED ${dir.toUpperCase()} OPENED: ${a.symbol} @ ${fmtPrice(fill)}\nDirection: ${dir.toUpperCase()} (${dir === "long" ? "buy" : "sell"}), size ${fmtUsd(sz.notional)}.\nWhy: price closed ${dir === "long" ? "above" : "below"} the range.\nStop ${lv.stop === null ? "off" : fmtPrice(lv.stop)} / Target ${lv.target === null ? "off" : fmtPrice(lv.target)}.${lockTrigger === null ? "" : `\nProfit lock: at ${fmtPrice(lockTrigger)} the stop moves to ${fmtPrice(lockStop)}.`}\nSimulation only: not a real order.`);
+  await db`update retest_setups set paper_state = 'entered', paper_note = null, trade_id = ${ins[0].id} where id = ${a.id}`;
+  msgs.push(`${dir === "long" ? "🟢" : "🔴"} SIMULATED ${dir.toUpperCase()} OPENED: ${a.symbol} @ ${fmtPrice(plan.fill)} (market order, taker)\nSize ${fmtUsd(plan.notional)}; a stop-out loses about ${fmtUsd(plan.riskUsd)} (${((plan.riskUsd / equity) * 100).toFixed(2)}% of equity) including costs${plan.cappedBy ? `; size capped by ${plan.cappedBy}` : ""}.\nStop ${fmtPrice(stop)} / Target ${fmtPrice(target)}, net R:R ${plan.eco.netRR.toFixed(2)} at this price.${lockTrigger === null ? "" : `\nProfit lock: at ${fmtPrice(lockTrigger)} the stop moves to ${fmtPrice(lockStop)}.`}${s.costsConfirmed ? "" : "\n⚠️ Fees are PLACEHOLDERS."}\nSimulation only: not a real order.`);
 }
 
 async function manageTrade(db: Db, s: Settings, t: Row, scan: { candles: Candle[]; coveredEnd: number } | null | undefined, livePrice: number | undefined, now: number, endBoundary: number, msgs: string[], notes: string[]) {
@@ -265,27 +269,32 @@ async function manageTrade(db: Db, s: Settings, t: Row, scan: { candles: Candle[
 export async function closeTrade(db: Db, s: Settings, t: Row, refExit: number, reason: string, closedAtMs: number, msgs?: string[]): Promise<boolean> {
   const dir = t.direction as Direction;
   const units = Number(t.units);
-  const fill = slipPrice(refExit, dir, "exit", s.slippagePct);
-  const m = closeMath(dir, Number(t.entry_price), fill, units, Number(t.entry_fee), s.feePct);
+  // A target that is a resting limit order fills at the target with the maker fee and no slippage; everything else is a market exit.
+  const limit = reason === "target" && s.targetFill === "maker";
+  const fill = limit ? refExit : slipPrice(refExit, dir, "exit", s.slippagePct + s.spreadPct / 2);
+  const m = closeMath(dir, Number(t.entry_price), fill, units, Number(t.entry_fee), limit ? s.makerFeePct : s.takerFeePct);
+  const heldH = Math.max(0, closedAtMs - Number(t.opened_ms ?? (t.opened_at ? new Date(t.opened_at).getTime() : closedAtMs))) / 3600000;
+  const funding = (Number(t.notional) * s.fundingPctPer8h * (heldH / 8)) / 100 * (dir === "long" ? 1 : -1);
+  const net = m.net - funding;
   const slipUsd = Math.abs(fill - refExit) * units;
-  const res = await db`update paper_trades set status = 'closed', ref_exit_price = ${refExit}, exit_price = ${fill}, exit_slippage_usd = ${slipUsd}, exit_fee = ${m.exitFee},
-      closed_at = to_timestamp(${closedAtMs / 1000}), exit_reason = ${reason}, gross_pnl = ${m.gross}, realized_pnl = ${m.net}, last_price = ${refExit}, last_price_at = now()
+  const res = await db`update paper_trades set status = 'closed', ref_exit_price = ${refExit}, exit_price = ${fill}, exit_slippage_usd = ${slipUsd}, exit_fee = ${m.exitFee}, funding_usd = ${funding}, exit_fill = ${limit ? "limit" : "market"},
+      closed_at = to_timestamp(${closedAtMs / 1000}), exit_reason = ${reason}, gross_pnl = ${m.gross}, realized_pnl = ${net}, last_price = ${refExit}, last_price_at = now()
     where id = ${t.id} and status = 'open' returning id`;
   if (!res.length) return false;
   const why = ({ stop: "stop hit", profit_lock: "profit lock hit", target: "target hit", time: "time limit", manual: "closed manually" } as Record<string, string>)[reason] || reason;
-  msgs?.push(`${m.net >= 0 ? "✅" : "❌"} SIMULATED ${dir.toUpperCase()} CLOSED: ${t.symbol} @ ${fmtPrice(fill)} (${why})\nSimulated P&L: ${fmtUsd(m.net, true)} after fees and slippage.\nSimulation only: not a real order.`);
+  msgs?.push(`${net >= 0 ? "✅" : "❌"} SIMULATED ${dir.toUpperCase()} CLOSED: ${t.symbol} @ ${fmtPrice(fill)} (${why})\nSimulated P&L: ${fmtUsd(net, true)} after fees, slippage${funding ? " and funding" : ""}.\nSimulation only: not a real order.`);
   return true;
 }
 
-const roundTripCostPct = (s: Settings) => 2 * (s.feePct + s.slippagePct);
+const roundTripCostPct = (s: Settings) => 2 * (s.takerFeePct + s.slippagePct + s.spreadPct / 2);
 
 // One forecast per horizon for the newest closed candle, including NO_SIGNAL, so every call (and every
 // non-call) can be scored later against baselines. Rows are append-only; a repeat tick for the same candle is a no-op.
-// This rule has NO calibrated probabilities (probs = null): it only says "closed beyond the range edge".
-async function logForecasts(db: Db, s: Settings, sym: string, closed: Candle[], fresh: { dir: "up" | "down"; high: number; low: number; width: number } | null, now: number) {
+// This rule has NO calibrated probabilities (probs = null): it says only "a confirmed retest rejection happened".
+async function logForecasts(db: Db, s: Settings, sym: string, closed: Candle[], st: Setup | null, now: number) {
   const last = closed[closed.length - 1];
   const issuedT = last.t + s.timeframeMin * MIN;
-  const direction: Direction4 = fresh ? (fresh.dir === "up" ? "UP" : "DOWN") : "NO_SIGNAL";
+  const direction: Direction4 = st ? (st.dir === "long" ? "UP" : "DOWN") : "NO_SIGNAL";
   for (const h of s.forecastHorizonsMin) {
     const f = buildForecast({
       symbol: sym,
@@ -293,16 +302,14 @@ async function logForecasts(db: Db, s: Settings, sym: string, closed: Candle[], 
       horizonMin: h,
       issuedT,
       now,
-      model: "range_breakout_v1",
+      model: "retest_zone_v1",
       direction,
       probs: null,
       refPrice: last.c,
       costPct: roundTripCostPct(s),
-      invalidationPrice: fresh ? (fresh.dir === "up" ? fresh.high : fresh.low) : null,
-      features: fresh ? { rangeHigh: fresh.high, rangeLow: fresh.low, rangeWidthPct: fresh.width, bufferPct: s.breakoutBufferPct, confirmCloses: s.confirmCloses } : {},
-      evidence: fresh
-        ? `Observed: ${s.confirmCloses} closed ${s.timeframeMin}m candle(s) beyond the range edge. Inference: none calibrated yet; this rule has no measured edge.`
-        : "No breakout confirmed on the newest closed candle.",
+      invalidationPrice: st ? st.invalidationPrice : null,
+      features: st ? { zoneLow: st.zoneLow, zoneHigh: st.zoneHigh, priorBounces: st.priorBounces, stopPct: st.stopPct, targetPct: st.targetPct, netRR: st.economics.netRR } : {},
+      evidence: st ? `Observed: ${st.evidence} Inference: none calibrated yet; this rule has no measured edge.` : "No confirmed retest setup on the newest closed candle.",
     });
     await logForecast(db, f);
   }

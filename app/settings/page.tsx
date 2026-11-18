@@ -79,7 +79,7 @@ export default function Settings() {
       const b = JSON.parse(text);
       if (b?.format !== "ctrm-backup-v1") throw new Error("not a backup from this app");
       setBackupText(text);
-      setBackupInfo(`Loaded: ${b.paper_trades.length} trades, ${b.range_alerts.length} alerts, ${b.equity_snapshots.length} equity points`);
+      setBackupInfo(`Loaded: ${b.paper_trades.length} trades, ${(b.retest_setups || []).length} setups, ${b.equity_snapshots.length} equity points`);
     } catch (e: any) {
       setBackupInfo(`Could not read that file: ${e.message}`);
     }
@@ -87,7 +87,7 @@ export default function Settings() {
   async function restore() {
     try {
       const r = await api("/api/import", { method: "POST", body: JSON.stringify({ confirm: "RESTORE", backup: JSON.parse(backupText) }) });
-      setMsg({ ok: true, text: `Restored ${r.restored.trades} trades, ${r.restored.alerts} alerts, ${r.restored.snapshots} equity points. Reload this page to see your restored settings.` });
+      setMsg({ ok: true, text: `Restored ${r.restored.trades} trades, ${r.restored.alerts} alerts and ${r.restored.setups ?? 0} setups, ${r.restored.snapshots} equity points. Reload this page to see your restored settings.` });
       setBackupText("");
       setBackupInfo("");
       setRestoreText("");
@@ -118,71 +118,59 @@ export default function Settings() {
           <input type="text" value={symbolsText} onChange={(e) => setSymbolsText(e.target.value)} autoCapitalize="characters" />
         </label>
         <Num s={s} set={set} k="tickIntervalMin" label="Cron interval (minutes): must match your cron-job.org schedule" step="1" />
-        <Sel s={s} set={set} k="timeframeMin" label="Candle size" opts={[[1, "1 minute"], [5, "5 minutes"], [15, "15 minutes"], [60, "1 hour"]]} />
+        <Sel s={s} set={set} k="timeframeMin" label="Trigger candle (confirmation)" opts={[[1, "1 minute"], [5, "5 minutes"], [15, "15 minutes"]]} />
       </fieldset>
 
       <fieldset>
-        <legend>Range discovery</legend>
-        <Sel s={s} set={set} k="detectionMode" label="Detection design" opts={[["tight_range", "Tight range + breakout (original design)"], ["swing_pattern", "Swing pattern + breakout (your design)"]]} />
-        <p className="muted" style={{ fontSize: 13 }}>Only the section for the chosen design is used. Either way, a LONG or SHORT signal needs a candle close beyond the edge of the range.</p>
-        <p className="muted" style={{ fontSize: 13, marginTop: 12 }}><b>Swing pattern settings</b> (used when "Swing pattern" is chosen): price swings back and forth inside a band for at least 2 cycles in a row; the engine decides how many cycles. Use any swing size you like, small for scalping.</p>
+        <legend>Retest zones</legend>
+        <p className="muted" style={{ fontSize: 13 }}>Zones come from past swing highs and lows on the zone timeframe. A bounce is counted only when price left the zone and came back; a break resets the count. Two bounces are a setting to test, not proof a level is stronger.</p>
+        <Sel s={s} set={set} k="zoneTfMin" label="Zone timeframe" opts={[[60, "1 hour"], [240, "4 hours (built from 1h)"]]} />
         <div className="two">
-          <Num s={s} set={set} k="swingMinPct" label="Smallest swing (%)" />
-          <Num s={s} set={set} k="swingBandTolPct" label="Band looseness (%)" />
-          <Num s={s} set={set} k="swingMaxCandles" label="Look back (candles)" step="1" />
+          <Num s={s} set={set} k="minPriorBounces" label="Earlier bounces required" step="1" />
+          <Num s={s} set={set} k="minWickFrac" label="Min rejection wick (fraction of candle)" />
+          <Num s={s} set={set} k="maxChasePct" label="Do not chase beyond (%)" />
+          <Num s={s} set={set} k="cooldownMin" label="Cooldown per zone and direction (min)" step="1" />
         </div>
-        <p className="muted" style={{ fontSize: 13 }}>Band looseness: how far the swing highs (and the swing lows) may drift from each other, as a % of the swing height. Lower = a flatter, stricter band. 50 is a good start; raise it to allow slow drift.</p>
-        <p className="muted" style={{ fontSize: 13, marginTop: 12 }}><b>Tight range settings</b> (used when "Tight range" is chosen):</p>
-        <div className="two">
-          <Num s={s} set={set} k="rangeLookback" label="Candles in range" step="1" />
-          <Num s={s} set={set} k="rangeMaxWidthPct" label="Max width (%)" />
-          <Num s={s} set={set} k="rangeMinTouches" label="Min touches per edge" step="1" />
-          <Num s={s} set={set} k="rangeTouchTolPct" label="Edge zone (% of height)" />
-          <Num s={s} set={set} k="rangeExpireCandles" label="Expire after (candles)" step="1" />
-        </div>
+        <Tog s={s} set={set} k="allowLong" label="Allow longs (bounce off support)" />
+        <Tog s={s} set={set} k="allowShort" label="Allow shorts (rejection at resistance)" />
       </fieldset>
 
       <fieldset>
-        <legend>Entry rule</legend>
-        <p className="muted" style={{ fontSize: 13 }}>A simulated position opens only after a candle closes outside the range, in that direction. A range alert alone never opens one.</p>
+        <legend>Entry, stop and target</legend>
+        <p className="muted" style={{ fontSize: 13 }}>Entry is a market order after the confirming candle closes. The stop sits beyond the far edge of the zone. A setup is dropped if the trade does not clear the minimum net reward-to-risk after costs.</p>
         <div className="two">
-          <Num s={s} set={set} k="breakoutBufferPct" label="Close beyond edge by (%)" />
-          <Num s={s} set={set} k="confirmCloses" label="Confirming closes" step="1" />
+          <Num s={s} set={set} k="stopBufferPct" label="Stop buffer beyond zone (%)" />
+          <Num s={s} set={set} k="minStopPct" label="Min stop distance (%)" />
+          <Num s={s} set={set} k="maxStopPct" label="Max stop distance (%)" />
+          <Num s={s} set={set} k="targetPct" label="Target (%)" />
+          <Num s={s} set={set} k="minNetRR" label="Min net reward : risk" />
+          <Num s={s} set={set} k="maxHoldMinutes" label="Time limit (minutes, 0 = none)" step="1" />
           <Num s={s} set={set} k="maxEntryDelaySec" label="Skip if later than (sec)" step="1" />
           <Num s={s} set={set} k="maxOpenPositions" label="Max open positions" step="1" />
         </div>
-        <Tog s={s} set={set} k="allowLong" label="Allow simulated longs (close above range)" />
-        <Tog s={s} set={set} k="allowShort" label="Allow simulated shorts (close below range)" />
       </fieldset>
 
       <fieldset>
-        <legend>Position size</legend>
-        <Sel s={s} set={set} k="sizingMode" label="Sizing" opts={[["fixed_usd", "Fixed USD per trade"], ["pct_equity", "% of equity"], ["risk_pct", "Risk % of equity (needs a stop)"]]} />
+        <legend>Risk</legend>
+        <p className="muted" style={{ fontSize: 13 }}>Size is set so a stop-out loses this share of equity including all costs, capped at your available virtual cash (spot style; margin and leverage are not simulated yet).</p>
         <div className="two">
-          <Num s={s} set={set} k="fixedUsd" label="Fixed USD" />
-          <Num s={s} set={set} k="pctEquity" label="% of equity" />
-          <Num s={s} set={set} k="riskPct" label="Risk % per trade" />
+          <Num s={s} set={set} k="riskPct" label="Risk per trade (% of equity)" />
+          <Num s={s} set={set} k="dailyLossLimitPct" label="Daily loss limit (% of equity)" />
         </div>
       </fieldset>
 
       <fieldset>
         <legend>Costs (applied to every simulated fill)</legend>
+        <p className="muted" style={{ fontSize: 13 }}>The numbers below are placeholders, not your real fees. Look up your taker and maker rates on your exchange's fee page, enter them, then tick confirmed. Until then every alert carries a warning.</p>
         <div className="two">
-          <Num s={s} set={set} k="feePct" label="Fee per side (%)" />
-          <Num s={s} set={set} k="slippagePct" label="Slippage per side (%)" />
+          <Num s={s} set={set} k="takerFeePct" label="Taker fee per fill (%)" />
+          <Num s={s} set={set} k="makerFeePct" label="Maker fee per fill (%)" />
+          <Num s={s} set={set} k="slippagePct" label="Slippage per market fill (%)" />
+          <Num s={s} set={set} k="spreadPct" label="Typical spread (%)" />
+          <Num s={s} set={set} k="fundingPctPer8h" label="Funding per 8h (%, perps; 0 for spot)" />
         </div>
-      </fieldset>
-
-      <fieldset>
-        <legend>Exits</legend>
-        <Sel s={s} set={set} k="stopMode" label="Stop" opts={[["pct", "Percent from entry"], ["range_edge", "Back at the broken range edge"], ["off", "No stop"]]} />
-        <Num s={s} set={set} k="stopPct" label="Stop distance (%)" />
-        <Sel s={s} set={set} k="targetMode" label="Target" opts={[["pct", "Percent from entry"], ["r_multiple", "Multiple of stop distance"], ["off", "No target"]]} />
-        <div className="two">
-          <Num s={s} set={set} k="targetPct" label="Target (%)" />
-          <Num s={s} set={set} k="targetR" label="Target (R multiple)" />
-        </div>
-        <Num s={s} set={set} k="maxHoldMinutes" label="Time limit (minutes, 0 = none)" step="1" />
+        <Sel s={s} set={set} k="targetFill" label="Profit target fills as" opts={[["taker", "Market order (taker)"], ["maker", "Resting limit order (maker)"]]} />
+        <Tog s={s} set={set} k="costsConfirmed" label="I have entered my real fees" />
       </fieldset>
 
       <fieldset>
@@ -223,7 +211,7 @@ export default function Settings() {
       {showReset && (
         <fieldset>
           <legend>Confirm reset</legend>
-          <p className="muted" style={{ fontSize: 13 }}>Deletes all simulated trades and equity history (range alerts are kept). Type RESET to confirm.</p>
+          <p className="muted" style={{ fontSize: 13 }}>Deletes all simulated trades and equity history (setup history is kept). Type RESET to confirm.</p>
           <input type="text" value={resetText} onChange={(e) => setResetText(e.target.value)} autoCapitalize="characters" />
           <div style={{ marginTop: 10 }}>
             <button className="danger" disabled={resetText !== "RESET"} onClick={reset}>Delete simulated history</button>

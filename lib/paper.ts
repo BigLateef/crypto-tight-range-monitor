@@ -1,6 +1,5 @@
 // Pure paper-trading math. SIMULATION ONLY: nothing here talks to an exchange.
 import type { Candle, Direction } from "./types";
-import type { Settings } from "./config";
 
 // Adverse slippage: buys fill higher, sells fill lower.
 export function slipPrice(price: number, dir: Direction, leg: "entry" | "exit", slipPct: number): number {
@@ -9,7 +8,7 @@ export function slipPrice(price: number, dir: Direction, leg: "entry" | "exit", 
   return buying ? price * (1 + f) : price * (1 - f);
 }
 
-type LevelSettings = Pick<Settings, "stopMode" | "stopPct" | "targetMode" | "targetPct" | "targetR">;
+type LevelSettings = { stopMode: "off" | "pct" | "range_edge"; stopPct: number; targetMode: "off" | "pct" | "r_multiple"; targetPct: number; targetR: number };
 
 export function levels(
   dir: Direction,
@@ -38,7 +37,7 @@ export function levels(
 }
 
 export function sizePosition(a: {
-  mode: Settings["sizingMode"];
+  mode: "fixed_usd" | "pct_equity" | "risk_pct";
   equity: number;
   cash: number;
   entry: number;

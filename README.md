@@ -81,3 +81,18 @@ npm run eval -- --strategy retest --final --taker ...
 - Arms of 0/1/2/3 prior bounces are compared; the primary arm (2) is declared in advance. Two bounces are a hypothesis being tested, not a guarantee.
 - The verdict is one of INSUFFICIENT DATA / NO EDGE DEMONSTRATED / POSITIVE BUT NOT BETTER THAN A COIN-FLIP DIRECTION / PASSES ON THIS SAMPLE (needs 100+ primary trades).
 - Tested only on synthetic data (random walks lose to costs, as they should). No real-market result exists yet; run the command with network access. Not financial advice.
+
+## Live mode is now retest-zone (the range rule is gone)
+
+The engine no longer looks for tight ranges or swing patterns. Every tick (1 minute) it, per symbol:
+1. Fetches 5m and 1h candles and runs the data-quality gate on both. Bad or stale data means no setup and a debounced health alert, never a normal-looking signal.
+2. Builds support/resistance zones from 1h (or 4h, resampled) swing pivots and counts completed bounces and breaks.
+3. Looks only at the newest closed 5m candle for a confirmed rejection that passes the no-chase, stop-distance and net reward-to-risk checks after costs.
+4. If it fires, writes one row to `retest_setups` (unique per symbol, direction and candle, plus a per-zone cooldown), sends one Telegram message, and logs a forecast. No setup is the normal outcome and sends nothing.
+5. Paper entry (market order, taker) is re-checked against the live price: late entry, chasing, price through the stop, net R:R at the live price, daily loss limit, max positions. Size is set so a stop-out loses `riskPct` of equity including costs, capped by virtual cash.
+
+**Deploy steps:** run `sql/006_retest_setups.sql` in your database (after 004 and 005), push, let Vercel deploy, set cron-job.org to every 1 minute, then open Settings: set the cron interval to 1, enter your real taker/maker fees and tick "I have entered my real fees". Old saved range settings are ignored. Until fees are confirmed every alert says they are placeholders.
+
+**Not simulated yet:** margin, leverage and liquidation (paper accounting is spot-style), and live funding rates (a flat per-8h rate you enter is charged by hold time). Live execution does not exist and will not be added without your explicit approval.
+
+**Verification status:** unit tests, a typecheck, and the SQL (migrations plus the insert/update statements, run on a local Postgres) pass. The engine has not run against real exchange data, Neon, or the deployed app. The legacy `npm run eval` forecast harness still tests the old range rule and is kept only for comparison; use `--strategy retest` for this strategy.

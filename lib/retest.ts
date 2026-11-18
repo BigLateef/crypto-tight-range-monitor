@@ -416,3 +416,57 @@ export function overlapsZone(a: { zoneLow: number; zoneHigh: number }, b: { zone
 export function inCooldown(prev: { dir: string; closeT: number; zoneLow: number; zoneHigh: number }[], s: Setup, cooldownMin: number) {
   return prev.some((p) => p.dir === s.dir && s.closeT - p.closeT < cooldownMin * 60000 && overlapsZone(p, s));
 }
+
+// ============================ paper entry planning ============================
+// Decides whether a setup that fired on a closed candle can still be entered NOW, and how big. Pure.
+// The entry is a market order (taker). Costs are added once, in the economics; the recorded fill price carries
+// the adverse slippage and half-spread so the paper account books the same thing the economics assumed.
+export function costsFromSettings(s: { takerFeePct: number; makerFeePct: number; slippagePct: number; spreadPct: number; targetFill: "maker" | "taker"; fundingPctPer8h: number; maxHoldMinutes: number }): Costs {
+  return {
+    takerFeePct: s.takerFeePct, makerFeePct: s.makerFeePct, slippagePct: s.slippagePct, spreadPct: s.spreadPct, targetFill: s.targetFill,
+    fundingPct: (s.fundingPctPer8h * Math.max(s.maxHoldMinutes, 0)) / 480, // worst case: held to the time limit
+  };
+}
+
+export type EntryPlan =
+  | { ok: false; why: string }
+  | { ok: true; fill: number; units: number; notional: number; entryFee: number; stopPct: number; targetPct: number; eco: Economics; riskUsd: number; cappedBy: string | null };
+
+export function planEntry(a: {
+  setup: { dir: "long" | "short"; closeT: number; refPrice: number; stopPrice: number; targetPrice: number };
+  livePrice: number;
+  now: number;
+  equity: number;
+  cash: number;
+  costs: Costs;
+  riskPct: number;
+  minStopPct: number;
+  maxStopPct: number;
+  minNetRR: number;
+  maxChasePct: number;
+  maxDelaySec: number;
+}): EntryPlan {
+  const { setup: st, livePrice: px, costs } = a;
+  const long = st.dir === "long";
+  if (!(px > 0)) return { ok: false, why: "no live price" };
+  const lateSec = Math.round((a.now - st.closeT) / 1000);
+  if (lateSec > a.maxDelaySec) return { ok: false, why: `entry window missed (${lateSec}s after the confirming close, limit ${a.maxDelaySec}s)` };
+  const ranPct = ((long ? px - st.refPrice : st.refPrice - px) / st.refPrice) * 100;
+  if (ranPct > a.maxChasePct) return { ok: false, why: `price already moved ${ranPct.toFixed(2)}% in the trade direction since the confirming close (limit ${a.maxChasePct}%): not chasing` };
+  if (long ? px <= st.stopPrice : px >= st.stopPrice) return { ok: false, why: "price is already through the stop level" };
+  if (long ? px >= st.targetPrice : px <= st.targetPrice) return { ok: false, why: "price is already at or past the target" };
+  const stopPct = (Math.abs(px - st.stopPrice) / px) * 100;
+  const targetPct = (Math.abs(st.targetPrice - px) / px) * 100;
+  if (stopPct < a.minStopPct) return { ok: false, why: `stop is only ${stopPct.toFixed(2)}% away now (minimum ${a.minStopPct}%)` };
+  if (stopPct > a.maxStopPct) return { ok: false, why: `stop is ${stopPct.toFixed(2)}% away now (maximum ${a.maxStopPct}%)` };
+  const eco = tradeEconomics(stopPct, targetPct, costs);
+  if (!(eco.netRR >= a.minNetRR)) return { ok: false, why: `net R:R after costs is ${eco.netRR.toFixed(2)} at the current price (need ${a.minNetRR})` };
+  const slip = (costs.slippagePct + costs.spreadPct / 2) / 100;
+  const fill = long ? px * (1 + slip) : px * (1 - slip);
+  const sz = positionSize({ equity: a.equity, riskPct: a.riskPct, netLossPct: eco.netLossPct, maxLeverage: 1 });
+  let notional = Math.min(sz.notional, a.cash / (1 + costs.takerFeePct / 100));
+  const cappedBy = notional < sz.notional ? "available virtual cash" : sz.cappedBy;
+  if (!(notional >= 10)) return { ok: false, why: "position would be under $10 (not enough virtual cash)" };
+  notional = Math.floor(notional * 100) / 100;
+  return { ok: true, fill, units: notional / fill, notional, entryFee: (notional * costs.takerFeePct) / 100, stopPct, targetPct, eco, riskUsd: (notional * eco.netLossPct) / 100, cappedBy };
+}

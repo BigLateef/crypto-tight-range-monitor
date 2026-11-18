@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {
   COSTS_PLACEHOLDER, TRIGGER_DEFAULTS, ZONE_DEFAULTS, atrSeries, buildZones, evaluateTrigger, expectancyPct, findPivots,
-  inCooldown, positionSize, priorBounces, resample, tradeEconomics, type Zone,
+  inCooldown, positionSize, priorBounces, resample, tradeEconomics, planEntry, costsFromSettings, type Zone,
 } from "../lib/retest.ts";
 
 const H = 3600000;
@@ -200,3 +200,28 @@ assert.equal(run(rej(100.45, 100.7, 99.9, 100.52)).setup, null);
   assert.equal(inCooldown([{ ...prev[0], zoneLow: 90, zoneHigh: 91 }], s, 60), false);
 }
 console.log("retest tests passed");
+
+// ---- planEntry (live paper entry decision) ----
+{
+  const costs = { takerFeePct: 0.1, makerFeePct: 0.05, slippagePct: 0.03, spreadPct: 0.01, targetFill: "taker" as const, fundingPct: 0 };
+  const st = { dir: "long" as const, closeT: 1_000_000, refPrice: 100, stopPrice: 99.5, targetPrice: 101.5 };
+  const base = { setup: st, livePrice: 100.05, now: 1_000_000 + 30_000, equity: 10000, cash: 10000, costs, riskPct: 1, minStopPct: 0.25, maxStopPct: 1, minNetRR: 1, maxChasePct: 0.35, maxDelaySec: 240 };
+  const ok = planEntry(base);
+  assert.ok(ok.ok);
+  if (ok.ok) {
+    assert.ok(ok.fill > 100.05, "long buys above the quote");
+    assert.ok(ok.notional <= 10000 && ok.cappedBy !== null, "a tight stop would need more than 1x equity, so the spot cash cap binds");
+    assert.ok(ok.riskUsd < 100);
+  }
+  const wide = planEntry({ ...base, setup: { ...st, stopPrice: 99.2, targetPrice: 102 } });
+  assert.ok(wide.ok && Math.abs(wide.riskUsd - 100) < 0.5 && wide.cappedBy === null, "uncapped: a stop-out loses ~1% of equity including costs");
+  assert.ok(!planEntry({ ...base, now: 1_000_000 + 600_000 }).ok, "late");
+  assert.ok(!planEntry({ ...base, livePrice: 100.5 }).ok, "chased");
+  assert.ok(!planEntry({ ...base, livePrice: 99.4 }).ok, "through stop");
+  assert.ok(!planEntry({ ...base, livePrice: 100.05, minNetRR: 3 }).ok, "costs kill rr");
+  assert.ok(!planEntry({ ...base, cash: 5 }).ok, "too small");
+  const sh = planEntry({ ...base, setup: { dir: "short", closeT: st.closeT, refPrice: 100, stopPrice: 100.5, targetPrice: 98.5 }, livePrice: 99.95 });
+  assert.ok(sh.ok && sh.fill < 99.95, "short sells below the quote");
+  assert.ok(Math.abs(costsFromSettings({ ...costs, fundingPctPer8h: 0.01, maxHoldMinutes: 240 }).fundingPct - 0.005) < 1e-12);
+  console.log("plan entry tests passed");
+}

@@ -28,7 +28,7 @@ export async function buildPortfolio() {
     db`select realized_pnl from paper_trades where status = 'closed' order by closed_at asc limit 5000`,
     db`select equity from equity_snapshots order by ts asc limit 30000`,
     db`select (extract(epoch from last_tick_at) * 1000)::bigint as last_tick_ms, last_tick_ok, last_tick_note from engine_state where id = 1`,
-    db`select count(*) as n from range_alerts where status = 'active'`,
+    db`select count(*) as n from retest_setups where detected_at > now() - interval '24 hours'`,
   ]);
   const acct = await loadAccount(s.startingBalance);
 

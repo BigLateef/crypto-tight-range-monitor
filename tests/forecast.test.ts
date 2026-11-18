@@ -88,7 +88,7 @@ function fakeDb(rows: Record<string, any>[][] = []) {
   assert.equal(validateSettings({ forecastHorizonsMin: "30,120" }).settings.forecastHorizonsMin.join(), "30,120");
   assert.equal(validateSettings({ forecastHorizonsMin: [7] }).ok, false);
   // changing the candle length so that existing horizons no longer fit is rejected, not silently accepted
-  assert.equal(validateSettings({ timeframeMin: 60, forecastHorizonsMin: [60, 240] }).ok, true);
+  assert.equal(validateSettings({ timeframeMin: 15, forecastHorizonsMin: [60, 240] }).ok, true);
   assert.equal(validateSettings({ forecastHorizonsMin: [60, 240] }, { ...DEFAULTS, timeframeMin: 15 }).ok, true);
   assert.equal(validateSettings({ timeframeMin: 15 }, { ...DEFAULTS, forecastHorizonsMin: [20] }).ok, false);
   console.log("forecast tests passed");

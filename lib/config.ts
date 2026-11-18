@@ -1,44 +1,38 @@
 // Pure settings model + validation. No imports, so it can be tested with plain node.
 
 export type Provider = "coinbase" | "binance";
-export type SizingMode = "fixed_usd" | "pct_equity" | "risk_pct";
-export type StopMode = "off" | "pct" | "range_edge";
-export type TargetMode = "off" | "pct" | "r_multiple";
-export type DetectionMode = "tight_range" | "swing_pattern";
+export type TargetFill = "maker" | "taker";
 
 export interface Settings {
   paperEnabled: boolean;
   provider: Provider;
   symbols: string[];
-  timeframeMin: number;
-  detectionMode: DetectionMode;
-  swingMinPct: number;
-  swingBandTolPct: number;
-  swingMaxCandles: number;
-  rangeLookback: number;
-  rangeMaxWidthPct: number;
-  rangeMinTouches: number;
-  rangeTouchTolPct: number;
-  rangeExpireCandles: number;
-  breakoutBufferPct: number;
-  confirmCloses: number;
+  timeframeMin: number; // trigger candle (confirmation) timeframe
+  zoneTfMin: number; // zone timeframe: 60 or 240 (4h is built from 1h candles)
+  minPriorBounces: number;
+  minWickFrac: number;
+  maxChasePct: number;
+  stopBufferPct: number;
+  minStopPct: number;
+  maxStopPct: number;
+  targetPct: number;
+  minNetRR: number;
+  cooldownMin: number;
   allowLong: boolean;
   allowShort: boolean;
   maxEntryDelaySec: number;
   tickIntervalMin: number;
   startingBalance: number;
-  sizingMode: SizingMode;
-  fixedUsd: number;
-  pctEquity: number;
-  riskPct: number;
+  riskPct: number; // equity lost if the stop is hit, INCLUDING costs
+  dailyLossLimitPct: number; // no new entries once today's realized loss reaches this % of equity
   maxOpenPositions: number;
-  feePct: number;
+  takerFeePct: number;
+  makerFeePct: number;
   slippagePct: number;
-  stopMode: StopMode;
-  stopPct: number;
-  targetMode: TargetMode;
-  targetPct: number;
-  targetR: number;
+  spreadPct: number;
+  fundingPctPer8h: number; // perps only; 0 for spot
+  targetFill: TargetFill;
+  costsConfirmed: boolean; // false = fees are still placeholders and every alert says so
   maxHoldMinutes: number;
   lockEnabled: boolean;
   lockTriggerPct: number;
@@ -52,34 +46,32 @@ export const DEFAULTS: Settings = {
   provider: "coinbase",
   symbols: ["BTC-USD", "ETH-USD", "SOL-USD"],
   timeframeMin: 5,
-  detectionMode: "tight_range",
-  swingMinPct: 0.5,
-  swingBandTolPct: 50,
-  swingMaxCandles: 120,
-  rangeLookback: 24,
-  rangeMaxWidthPct: 2.5,
-  rangeMinTouches: 2,
-  rangeTouchTolPct: 20,
-  rangeExpireCandles: 48,
-  breakoutBufferPct: 0.05,
-  confirmCloses: 1,
+  zoneTfMin: 60,
+  minPriorBounces: 2,
+  minWickFrac: 0.35,
+  maxChasePct: 0.35,
+  stopBufferPct: 0.1,
+  minStopPct: 0.25,
+  maxStopPct: 1.0,
+  targetPct: 1.0,
+  minNetRR: 1.0,
+  cooldownMin: 60,
   allowLong: true,
   allowShort: true,
   maxEntryDelaySec: 240,
-  tickIntervalMin: 5,
+  tickIntervalMin: 1,
   startingBalance: 10000,
-  sizingMode: "fixed_usd",
-  fixedUsd: 500,
-  pctEquity: 10,
   riskPct: 1,
+  dailyLossLimitPct: 3,
   maxOpenPositions: 3,
-  feePct: 0.1,
-  slippagePct: 0.05,
-  stopMode: "pct",
-  stopPct: 1.5,
-  targetMode: "pct",
-  targetPct: 3,
-  targetR: 2,
+  // PLACEHOLDERS, not your real fees. Replace them with the numbers on your exchange's fee page, then confirm.
+  takerFeePct: 0.1,
+  makerFeePct: 0.1,
+  slippagePct: 0.03,
+  spreadPct: 0.01,
+  fundingPctPer8h: 0,
+  targetFill: "taker",
+  costsConfirmed: false,
   maxHoldMinutes: 240,
   lockEnabled: false,
   lockTriggerPct: 1.5,
@@ -90,41 +82,37 @@ export const DEFAULTS: Settings = {
 
 // [min, max, integer?]
 const NUM: Record<string, [number, number, boolean]> = {
-  swingMinPct: [0.05, 20, false],
-  swingBandTolPct: [5, 300, false],
-  swingMaxCandles: [20, 250, true],
-  rangeLookback: [8, 100, true],
-  rangeMaxWidthPct: [0.1, 20, false],
-  rangeMinTouches: [1, 10, true],
-  rangeTouchTolPct: [5, 50, false],
-  rangeExpireCandles: [4, 150, true],
-  breakoutBufferPct: [0, 5, false],
-  confirmCloses: [1, 3, true],
+  minPriorBounces: [0, 6, true],
+  minWickFrac: [0, 1, false],
+  maxChasePct: [0.02, 5, false],
+  stopBufferPct: [0, 2, false],
+  minStopPct: [0.02, 10, false],
+  maxStopPct: [0.05, 20, false],
+  targetPct: [0.05, 20, false],
+  minNetRR: [0.2, 10, false],
+  cooldownMin: [0, 1440, true],
   maxEntryDelaySec: [30, 3600, true],
   tickIntervalMin: [1, 30, true],
   startingBalance: [100, 1e9, false],
-  fixedUsd: [10, 1e9, false],
-  pctEquity: [0.1, 100, false],
-  riskPct: [0.1, 25, false],
+  riskPct: [0.1, 5, false],
+  dailyLossLimitPct: [0.1, 25, false],
   maxOpenPositions: [1, 20, true],
-  feePct: [0, 5, false],
-  slippagePct: [0, 5, false],
-  stopPct: [0.05, 50, false],
-  targetPct: [0.05, 500, false],
-  targetR: [0.1, 50, false],
+  takerFeePct: [0, 2, false],
+  makerFeePct: [0, 2, false],
+  slippagePct: [0, 2, false],
+  spreadPct: [0, 2, false],
+  fundingPctPer8h: [-1, 1, false],
   maxHoldMinutes: [0, 1440, true],
   lockTriggerPct: [0.1, 100, false],
   lockProfitPct: [0, 50, false],
   minMovePct: [0, 20, false],
 };
-const BOOL = ["paperEnabled", "allowLong", "allowShort", "lockEnabled"];
+const BOOL = ["paperEnabled", "allowLong", "allowShort", "lockEnabled", "costsConfirmed"];
 const ENUM: Record<string, string[]> = {
   provider: ["coinbase", "binance"],
-  detectionMode: ["tight_range", "swing_pattern"],
-  sizingMode: ["fixed_usd", "pct_equity", "risk_pct"],
-  stopMode: ["off", "pct", "range_edge"],
-  targetMode: ["off", "pct", "r_multiple"],
+  targetFill: ["maker", "taker"],
 };
+const ZONE_TFS = [60, 240];
 const TIMEFRAMES = [1, 5, 15, 60];
 const SYMBOL_RE = /^[A-Z0-9]{2,10}-[A-Z]{3,5}$/;
 
@@ -176,6 +164,10 @@ export function validateSettings(input: Record<string, unknown>, base: Settings 
       const n = Number(v);
       if (TIMEFRAMES.includes(n)) s.timeframeMin = n;
       else errors.push(`timeframeMin must be one of ${TIMEFRAMES.join(", ")}`);
+    } else if (k === "zoneTfMin") {
+      const n = Number(v);
+      if (ZONE_TFS.includes(n)) s.zoneTfMin = n;
+      else errors.push(`zoneTfMin must be one of ${ZONE_TFS.join(", ")}`);
     } else if (k === "symbols") {
       const p = parseSymbols(v);
       if (p) s.symbols = p;
@@ -191,8 +183,8 @@ export function validateSettings(input: Record<string, unknown>, base: Settings 
     errors.push(`forecast horizons ${s.forecastHorizonsMin.join(",")} are not multiples of the ${s.timeframeMin}m candle`);
   }
   if (!s.allowLong && !s.allowShort) errors.push("allow at least one of long / short");
-  if (s.sizingMode === "risk_pct" && s.stopMode === "off") errors.push("risk-based sizing needs a stop (stop is off)");
-  if (s.targetMode === "r_multiple" && s.stopMode === "off") errors.push("R-multiple target needs a stop (stop is off)");
+  if (!(s.minStopPct < s.maxStopPct)) errors.push("min stop must be smaller than max stop");
+  if (s.timeframeMin >= s.zoneTfMin) errors.push("the trigger candle must be shorter than the zone candle");
   if (s.lockEnabled && !(s.lockProfitPct < s.lockTriggerPct)) errors.push("profit lock: the locked profit must be smaller than the trigger");
   return { settings: s as Settings, errors, ok: errors.length === 0 };
 }

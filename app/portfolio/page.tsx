@@ -76,10 +76,10 @@ export default function Portfolio() {
       </div>
       <div className="status">
         <span className={`pill ${d.paperEnabled ? "on" : "off"}`}>{d.paperEnabled ? "Paper trading ON" : "Paper trading OFF"}</span>
-        <span className="pill">Range alerts active: {d.activeRanges}</span>
+        <span className="pill">Setups in last 24h: {d.activeRanges}</span>
         <span className="pill">{d.timeframeMin}m candles</span>
       </div>
-      {!d.paperEnabled && <div className="banner">Paper trading is off: no new simulated positions open. Range alerts keep running, and open simulated positions are still managed to their exits.</div>}
+      {!d.paperEnabled && <div className="banner">Paper trading is off: no new simulated positions open. Setup alerts keep running, and open simulated positions are still managed to their exits.</div>}
       {stale && (
         <div className="banner">
           {tickAge === null ? "The engine has not run yet. Set up the cron-job.org job (see README)." : `The engine last ran ${fmtDuration(tickAge)} ago, so exits, entries and alerts may be late.`}
@@ -110,7 +110,7 @@ export default function Portfolio() {
       </div>
 
       <h2>Open positions (simulated)</h2>
-      {d.open.length === 0 && <div className="empty">No open simulated positions. One opens only after a confirmed candle close outside a discovered range.</div>}
+      {d.open.length === 0 && <div className="empty">No open simulated positions. One opens only after a confirmed rejection candle at a retest zone, and only if it still clears the cost and no-chase checks.</div>}
       {d.open.map((p: any) => (
         <div className="row" key={p.id}>
           <div className="head">
