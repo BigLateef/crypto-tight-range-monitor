@@ -176,6 +176,7 @@ async function tryEnter(db: Db, s: Settings, a: Row, prices: Record<string, numb
     if (why !== "Paper trading was off") msgs.push(`⚪ NO SIMULATED ${dir.toUpperCase()} ENTRY: ${a.symbol}\nReason: ${why}.`);
   };
   if (!s.paperEnabled) return skip("Paper trading was off");
+  if (s.haltEntries) return skip("Kill switch is on: new paper entries are halted");
   if (!s.riskConfirmed) return skip("Risk per trade and daily loss limit are not confirmed yet. Set your own values in Settings and tick confirmed; no paper entry opens until then");
   if (dir === "long" && !s.allowLong) return skip("Long entries are disabled");
   if (dir === "short" && !s.allowShort) return skip("Short entries are disabled");

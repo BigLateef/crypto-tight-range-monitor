@@ -107,6 +107,7 @@ export default function Settings() {
       <fieldset>
         <legend>Paper trading</legend>
         <Tog s={s} set={set} k="paperEnabled" label="Paper trading enabled (alerts keep running when off)" />
+        <Tog s={s} set={set} k="haltEntries" label="Kill switch: halt new paper entries (open positions still managed to exit)" />
         <Num s={s} set={set} k="startingBalance" label="Starting balance (virtual USD)" />
         <p className="muted" style={{ fontSize: 13 }}>Changing the starting balance re-bases the whole simulated account. Use Reset below for a clean start.</p>
       </fieldset>

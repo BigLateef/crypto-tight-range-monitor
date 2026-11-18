@@ -96,3 +96,10 @@ The engine no longer looks for tight ranges or swing patterns. Every tick (1 min
 **Not simulated yet:** margin, leverage and liquidation (paper accounting is spot-style), and live funding rates (a flat per-8h rate you enter is charged by hold time). Live execution does not exist and will not be added without your explicit approval.
 
 **Verification status:** unit tests, a typecheck, and the SQL (migrations plus the insert/update statements, run on a local Postgres) pass. The engine has not run against real exchange data, Neon, or the deployed app. The legacy `npm run eval` forecast harness still tests the old range rule and is kept only for comparison; use `--strategy retest` for this strategy.
+
+## Stage B: live paper trading and scorecard
+
+- **Kill switch** (Settings): halts new paper entries instantly. Alerts continue and open positions are still managed to their exits.
+- **Scorecard** (Portfolio page): closed paper trades from setups, win rate with a 95% range, the average break-even win rate after costs, average win/loss, expectancy, and the setups that were skipped, grouped by reason (missed signals). Until 100 closed trades it says INSUFFICIENT EVIDENCE and makes no claim. Even past that it never says the strategy works; paper fills have no queue, partial fills or outages.
+- Daily loss limit, risk-per-trade and fees must each be confirmed by you before entries open or results mean anything.
+- Not built: margin/liquidation simulation and live funding rates. Stage C (live execution) does not exist and needs your explicit approval later.

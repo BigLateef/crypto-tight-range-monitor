@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "node --experimental-strip-types tests/range.test.ts && node --experimental-strip-types tests/paper.test.ts && node --experimental-strip-types tests/config.test.ts && node --experimental-strip-types tests/backup.test.ts && node --experimental-strip-types tests/dataquality.test.ts && node --experimental-strip-types tests/outcome.test.ts && node --experimental-strip-types tests/forecast.test.ts && node --experimental-strip-types tests/eval.test.ts && node --experimental-strip-types tests/retest.test.ts && node --experimental-strip-types tests/retest-eval.test.ts",
+    "test": "node --experimental-strip-types tests/range.test.ts && node --experimental-strip-types tests/paper.test.ts && node --experimental-strip-types tests/config.test.ts && node --experimental-strip-types tests/backup.test.ts && node --experimental-strip-types tests/dataquality.test.ts && node --experimental-strip-types tests/outcome.test.ts && node --experimental-strip-types tests/forecast.test.ts && node --experimental-strip-types tests/eval.test.ts && node --experimental-strip-types tests/retest.test.ts && node --experimental-strip-types tests/retest-eval.test.ts && node --experimental-strip-types tests/report.test.ts",
     "eval": "node --experimental-strip-types --no-warnings eval/run.ts"
   },
   "dependencies": {

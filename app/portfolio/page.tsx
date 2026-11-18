@@ -79,6 +79,8 @@ export default function Portfolio() {
         <span className="pill">Setups in last 24h: {d.activeRanges}</span>
         <span className="pill">{d.timeframeMin}m candles</span>
       </div>
+      {d.haltEntries && <div className="banner">Kill switch is ON: no new paper entries open. Alerts keep running and open positions are still managed to their exits.</div>}
+      {(!d.riskConfirmed || !d.costsConfirmed) && <div className="banner">{!d.riskConfirmed ? "Risk settings are unconfirmed placeholders, so no paper entry opens. " : ""}{!d.costsConfirmed ? "Fees are unconfirmed placeholders, so results below are not meaningful. " : ""}Set and confirm them in Settings.</div>}
       {!d.paperEnabled && <div className="banner">Paper trading is off: no new simulated positions open. Setup alerts keep running, and open simulated positions are still managed to their exits.</div>}
       {stale && (
         <div className="banner">
@@ -107,6 +109,25 @@ export default function Portfolio() {
         <div className="stat"><div className="k">Win rate</div><div className="v num">{st.winRatePct === null ? "-" : fmtPct(st.winRatePct, 0)}</div></div>
         <div className="stat"><div className="k">Closed trades</div><div className="v num">{st.closedCount}</div></div>
         <div className="stat"><div className="k">Largest drawdown</div><div className="v num">{st.closedCount || st.maxDrawdownUsd ? fmtPct(st.maxDrawdownPct, 1) : "-"}</div></div>
+      </div>
+
+      <h2>Scorecard (paper results vs break-even)</h2>
+      <div className="banner">{d.report.verdict}</div>
+      <div className="kv num">
+        <div><span>Closed trades from setups</span><span>{d.report.n} (need {d.report.minTrades})</span></div>
+        <div><span>Win rate</span><span>{d.report.winRate === null ? "-" : `${(d.report.winRate * 100).toFixed(1)}% (95% range ${(d.report.winRateLow * 100).toFixed(0)}-${(d.report.winRateHigh * 100).toFixed(0)}%)`}</span></div>
+        <div><span>Break-even win rate (after costs)</span><span>{d.report.avgBreakEven === null ? "-" : `${(d.report.avgBreakEven * 100).toFixed(0)}%`}</span></div>
+        <div><span>Average win / loss</span><span>{fmtUsd(d.report.avgWin)} / {fmtUsd(d.report.avgLoss)}</span></div>
+        <div><span>Expectancy per trade (after costs)</span><span>{fmtUsd(d.report.expectancy, true)}</span></div>
+        <div><span>Setups: entered / skipped / pending</span><span>{d.report.setups.entered} / {d.report.setups.skipped} / {d.report.setups.pending}</span></div>
+      </div>
+      {d.report.setups.topSkipReasons.length > 0 && (
+        <div className="muted" style={{ fontSize: 13.5, marginTop: 8 }}>
+          Signals not traded, by reason: {d.report.setups.topSkipReasons.map((r: any) => `${r.reason} (${r.count})`).join("; ")}
+        </div>
+      )}
+      <div className="muted" style={{ fontSize: 13.5, marginTop: 8 }}>
+        {d.report.bySymbol.map((x: any) => `${x.key}: ${x.n} trades`).join(" | ")}{d.report.byDirection.length ? " || " : ""}{d.report.byDirection.map((x: any) => `${x.key}: ${x.n} trades`).join(" | ")}. Slices are descriptive only; a good-looking slice is a hypothesis for fresh data.
       </div>
 
       <h2>Open positions (simulated)</h2>

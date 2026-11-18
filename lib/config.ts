@@ -5,6 +5,7 @@ export type TargetFill = "maker" | "taker";
 
 export interface Settings {
   paperEnabled: boolean;
+  haltEntries: boolean; // kill switch: no new paper entries; alerts keep running and open positions are still managed to exit
   provider: Provider;
   symbols: string[];
   timeframeMin: number; // trigger candle (confirmation) timeframe
@@ -44,6 +45,7 @@ export interface Settings {
 
 export const DEFAULTS: Settings = {
   paperEnabled: true,
+  haltEntries: false,
   provider: "coinbase",
   symbols: ["BTC-USD", "ETH-USD", "SOL-USD"],
   timeframeMin: 5,
@@ -110,7 +112,7 @@ const NUM: Record<string, [number, number, boolean]> = {
   lockProfitPct: [0, 50, false],
   minMovePct: [0, 20, false],
 };
-const BOOL = ["paperEnabled", "allowLong", "allowShort", "lockEnabled", "costsConfirmed", "riskConfirmed"];
+const BOOL = ["paperEnabled", "haltEntries", "allowLong", "allowShort", "lockEnabled", "costsConfirmed", "riskConfirmed"];
 const ENUM: Record<string, string[]> = {
   provider: ["coinbase", "binance"],
   targetFill: ["maker", "taker"],

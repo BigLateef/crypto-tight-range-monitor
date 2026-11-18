@@ -4,6 +4,7 @@ import { loadAccount, markOpen } from "./account";
 import { fetchPrice } from "./provider";
 import { computeStats, unrealizedPnl } from "./paper";
 import type { Direction } from "./types";
+import { paperReport } from "./report";
 
 const cache = new Map<string, { p: number; at: number }>();
 async function livePrice(provider: any, sym: string): Promise<{ p: number | null; live: boolean }> {
@@ -22,13 +23,15 @@ export async function buildPortfolio() {
   const db = sql();
   const s = await loadSettings();
   const now = Date.now();
-  const [openRows, closedRows, pnlRows, eqRows, eng, alertCount] = await Promise.all([
+  const [openRows, closedRows, pnlRows, eqRows, eng, alertCount, repTrades, funnel] = await Promise.all([
     db`select *, (extract(epoch from opened_at) * 1000)::bigint as opened_ms from paper_trades where status = 'open' order by id desc`,
     db`select *, (extract(epoch from opened_at) * 1000)::bigint as opened_ms, (extract(epoch from closed_at) * 1000)::bigint as closed_ms from paper_trades where status = 'closed' order by closed_at desc limit 200`,
     db`select realized_pnl from paper_trades where status = 'closed' order by closed_at asc limit 5000`,
     db`select equity from equity_snapshots order by ts asc limit 30000`,
     db`select (extract(epoch from last_tick_at) * 1000)::bigint as last_tick_ms, last_tick_ok, last_tick_note from engine_state where id = 1`,
     db`select count(*) as n from retest_setups where detected_at > now() - interval '24 hours'`,
+    db`select t.realized_pnl, t.direction, t.symbol, r.break_even_win_rate from paper_trades t left join retest_setups r on r.id = t.setup_id where t.status = 'closed' and t.setup_id is not null order by t.closed_at asc limit 5000`,
+    db`select paper_state, paper_note, count(*) as n from retest_setups group by paper_state, paper_note`,
   ]);
   const acct = await loadAccount(s.startingBalance);
 
@@ -85,6 +88,10 @@ export async function buildPortfolio() {
     closedMs: Number(t.closed_ms),
   }));
   const stats = computeStats(pnlRows.map((r: Row) => Number(r.realized_pnl)), eqRows.map((r: Row) => Number(r.equity)), s.startingBalance);
+  const report = paperReport(
+    repTrades.map((r: Row) => ({ pnl: Number(r.realized_pnl), breakEven: r.break_even_win_rate == null ? null : Number(r.break_even_win_rate), direction: String(r.direction), symbol: String(r.symbol) })),
+    funnel.map((r: Row) => ({ state: String(r.paper_state), note: r.paper_note == null ? null : String(r.paper_note), n: Number(r.n) })),
+  );
   const lastTickMs = eng[0]?.last_tick_ms ? Number(eng[0].last_tick_ms) : null;
 
   return {
@@ -105,6 +112,10 @@ export async function buildPortfolio() {
       equityChangePct: ((equity - s.startingBalance) / s.startingBalance) * 100,
     },
     stats,
+    report,
+    haltEntries: s.haltEntries,
+    riskConfirmed: s.riskConfirmed,
+    costsConfirmed: s.costsConfirmed,
     open,
     closed,
     engine: { lastTickMs, ok: eng[0]?.last_tick_ok ?? null, note: eng[0]?.last_tick_note || null },
